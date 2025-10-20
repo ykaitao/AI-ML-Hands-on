@@ -1,0 +1,6 @@
+accelerate
+datasets
+ipykernel
+matplotlib
+torch
+transformers
