@@ -537,3 +537,640 @@ tokenizer = ByteLevelBPETokenizer(
 5. **Trim offsets** - Only when you need character-level alignment
 6. **add_prefix_space=True** - For GPT-style models and consistency
 7. **Avoid subword markers** - ByteLevelBPE handles boundaries automatically
+
+# Best Practices for `train()` and `train_from_iterator()` Arguments
+
+Based on the code, here's a comprehensive guide for the training function arguments:
+
+---
+
+## 1. **`files`** (for `train()`) / **`iterator`** (for `train_from_iterator()`)
+
+### ✅ When to use `train()` with files:
+- **Large datasets on disk** - efficient memory usage, reads line by line
+- **Multiple files** - can pass list of file paths
+- **Static datasets** - data already saved as text files
+- **Simple workflows** - straightforward file-based training
+- **Reproducibility** - same files give same results
+
+### ✅ When to use `train_from_iterator()`:
+- **Streaming data** - data doesn't fit in memory
+- **Dynamic preprocessing** - apply transformations on-the-fly
+- **Database/API sources** - data not in files
+- **Memory constraints** - process data in chunks
+- **Real-time data** - training on live data streams
+
+```python
+# ✅ GOOD: Training from files (simple, most common)
+tokenizer = ByteLevelBPETokenizer()
+tokenizer.train(
+    files=["corpus1.txt", "corpus2.txt", "corpus3.txt"],
+    vocab_size=30000
+)
+
+# ✅ GOOD: Training from a single file
+tokenizer.train(files="large_corpus.txt", vocab_size=30000)
+
+# ✅ GOOD: Training from iterator (memory-efficient)
+def data_generator():
+    with open("huge_file.txt") as f:
+        for line in f:
+            yield line.strip().lower()  # Preprocess on-the-fly
+
+tokenizer = ByteLevelBPETokenizer()
+tokenizer.train_from_iterator(
+    iterator=data_generator(),
+    vocab_size=30000,
+    length=1000000  # Important: provide approximate length
+)
+
+# ✅ GOOD: Streaming from multiple sources
+def multi_source_generator():
+    # From file
+    with open("file1.txt") as f:
+        for line in f:
+            yield line
+    # From API/database
+    for item in database.query():
+        yield item.text
+    # From processed data
+    for doc in preprocessed_docs:
+        yield doc
+
+tokenizer.train_from_iterator(iterator=multi_source_generator())
+
+# ❌ BAD: Loading entire huge file into memory
+with open("huge_file.txt") as f:
+    all_lines = f.readlines()  # Memory issue!
+tokenizer.train_from_iterator(iter(all_lines))
+
+# ✅ BETTER: Just use train() with files
+tokenizer.train(files="huge_file.txt")
+```
+
+---
+
+## 2. **`vocab_size`**
+
+### ✅ When to use different sizes:
+
+**Small (1,000 - 10,000):**
+- Very limited domains (medical codes, product IDs)
+- Resource-constrained deployment
+- Simple/repetitive text
+
+**Medium (10,000 - 32,000):**
+- **Most common choice** (GPT-2 uses 50,257)
+- Balanced between coverage and efficiency
+- General-purpose applications
+- Single language models
+
+**Large (50,000 - 100,000+):**
+- Multilingual models (cover many languages)
+- Rich, diverse corpora
+- Code + natural language
+- Large model capacity available
+
+### 💡 Guidelines:
+```python
+# ✅ GOOD: Small domain-specific corpus
+tokenizer.train(
+    files="medical_codes.txt",
+    vocab_size=5000  # Limited, specialized vocabulary
+)
+
+# ✅ GOOD: Standard English text (most common)
+tokenizer.train(
+    files="english_corpus.txt",
+    vocab_size=30000  # Good default
+)
+
+# ✅ GOOD: Large multilingual corpus
+tokenizer.train(
+    files=["en.txt", "fr.txt", "de.txt", "zh.txt"],
+    vocab_size=64000  # Need more tokens for multiple languages
+)
+
+# ✅ GOOD: Code + documentation
+tokenizer.train(
+    files="github_repos.txt",
+    vocab_size=50000  # Code has many unique tokens
+)
+
+# ❌ BAD: Tiny vocab for diverse data
+tokenizer.train(
+    files="wikipedia_dump.txt",
+    vocab_size=1000  # Way too small! Most words will be UNK
+)
+
+# ❌ BAD: Huge vocab for small data
+tokenizer.train(
+    files="100_emails.txt",
+    vocab_size=100000  # Overfitting, many single-character tokens
+)
+
+# 💡 RULE OF THUMB: 
+# vocab_size should be ~1-5% of unique words in corpus
+# For 1M unique words → vocab_size of 10k-50k is reasonable
+```
+
+---
+
+## 3. **`min_frequency`**
+
+### ✅ When to use different thresholds:
+
+**Low (1-2):** Default, most inclusive
+**Medium (3-5):** Filter rare typos/errors
+**High (10+):** Very clean, common tokens only
+
+### 💡 Best Practices:
+```python
+# ✅ GOOD: Large, clean corpus (default)
+tokenizer.train(
+    files="wikipedia.txt",
+    vocab_size=30000,
+    min_frequency=2  # Standard, filters hapax legomena
+)
+
+# ✅ GOOD: Noisy social media data
+tokenizer.train(
+    files="tweets.txt",
+    vocab_size=30000,
+    min_frequency=5  # Filter typos, rare username fragments
+)
+
+# ✅ GOOD: Small corpus (keep more tokens)
+tokenizer.train(
+    files="small_dataset.txt",
+    vocab_size=10000,
+    min_frequency=1  # Don't over-filter when data is limited
+)
+
+# ✅ GOOD: Very large corpus with noise
+tokenizer.train(
+    files="web_crawl.txt",
+    vocab_size=50000,
+    min_frequency=10  # Aggressive filtering for quality
+)
+
+# ❌ BAD: High threshold on small data
+tokenizer.train(
+    files="1000_sentences.txt",
+    vocab_size=5000,
+    min_frequency=50  # Too aggressive! Will have almost no vocab
+)
+
+# 💡 CONSIDERATIONS:
+# - Higher min_frequency → cleaner vocab, better quality
+# - Lower min_frequency → more coverage, handles rare words
+# - Balance with corpus size: small data needs lower threshold
+```
+
+**Interactive calculation example:**
+```python
+# Estimate min_frequency based on corpus
+import re
+from collections import Counter
+
+def suggest_min_frequency(file_path):
+    words = []
+    with open(file_path) as f:
+        for line in f:
+            words.extend(re.findall(r'\w+', line.lower()))
+    
+    freq = Counter(words)
+    total_tokens = len(words)
+    unique_tokens = len(freq)
+    
+    print(f"Total tokens: {total_tokens:,}")
+    print(f"Unique tokens: {unique_tokens:,}")
+    
+    # Suggest min_frequency
+    if total_tokens < 100_000:
+        return 1  # Small corpus
+    elif total_tokens < 1_000_000:
+        return 2  # Medium corpus
+    elif total_tokens < 10_000_000:
+        return 3  # Large corpus
+    else:
+        return 5  # Very large corpus
+
+min_freq = suggest_min_frequency("my_corpus.txt")
+tokenizer.train(files="my_corpus.txt", min_frequency=min_freq)
+```
+
+---
+
+## 4. **`show_progress`**
+
+### ✅ When to use (`True`):
+- **Interactive training** - Jupyter notebooks, development
+- **Long training runs** - want to monitor progress
+- **Debugging** - see where training might stall
+- **User-facing applications** - show progress to users
+
+### ❌ When to use (`False`):
+- **Production pipelines** - logs get cluttered
+- **Automated scripts** - running in background
+- **Testing/CI** - cleaner output
+- **Batch processing** - training many tokenizers
+
+```python
+# ✅ GOOD: Interactive notebook
+tokenizer = ByteLevelBPETokenizer()
+tokenizer.train(
+    files="large_corpus.txt",
+    vocab_size=30000,
+    show_progress=True  # See progress bar
+)
+
+# ✅ GOOD: Production pipeline
+def train_tokenizer_batch(files_list):
+    for i, files in enumerate(files_list):
+        tokenizer = ByteLevelBPETokenizer()
+        tokenizer.train(
+            files=files,
+            vocab_size=30000,
+            show_progress=False  # Clean logs
+        )
+        tokenizer.save(f"tokenizer_{i}")
+        print(f"Completed tokenizer {i}")
+
+# ✅ GOOD: Custom progress tracking
+def train_with_custom_logging(files):
+    print(f"Starting training on {files}")
+    tokenizer = ByteLevelBPETokenizer()
+    tokenizer.train(
+        files=files,
+        vocab_size=30000,
+        show_progress=False  # Use custom logging instead
+    )
+    print("Training complete!")
+```
+
+---
+
+## 5. **`special_tokens`**
+
+### ✅ Essential special tokens to include:
+
+**Core tokens (always include):**
+- `<pad>` - Padding token
+- `<unk>` / `<|endoftext|>` - Unknown/end token
+- `<s>` / `</s>` - Start/end of sequence (for seq2seq)
+
+**Task-specific:**
+- `<mask>` - Masked language modeling (BERT-style)
+- `<cls>`, `<sep>` - Classification tasks
+- `<|startoftext|>`, `<|endoftext|>` - GPT-style
+- Custom tokens - `<user>`, `<bot>`, `<code>`, etc.
+
+### 💡 Best Practices:
+
+```python
+from tokenizers import AddedToken
+
+# ✅ GOOD: Minimal special tokens (GPT-2 style)
+tokenizer = ByteLevelBPETokenizer()
+tokenizer.train(
+    files="corpus.txt",
+    vocab_size=30000,
+    special_tokens=["<|endoftext|>"]  # GPT-2 uses one special token
+)
+
+# ✅ GOOD: Standard NLP tasks
+tokenizer.train(
+    files="corpus.txt",
+    vocab_size=30000,
+    special_tokens=[
+        "<pad>",    # Padding (always ID 0)
+        "<unk>",    # Unknown tokens
+        "<s>",      # Start of sequence
+        "</s>"      # End of sequence
+    ]
+)
+
+# ✅ GOOD: BERT-style masked language modeling
+tokenizer.train(
+    files="corpus.txt",
+    vocab_size=30000,
+    special_tokens=[
+        "<pad>",
+        "<unk>",
+        "<cls>",    # Classification token
+        "<sep>",    # Separator
+        "<mask>"    # Masking token
+    ]
+)
+
+# ✅ GOOD: Custom application (chatbot)
+tokenizer.train(
+    files="conversations.txt",
+    vocab_size=30000,
+    special_tokens=[
+        "<pad>",
+        "<|endoftext|>",
+        "<user>",       # User message marker
+        "<assistant>",  # Assistant response marker
+        "<system>"      # System message marker
+    ]
+)
+
+# ✅ GOOD: Using AddedToken for fine control
+special_tokens = [
+    "<pad>",
+    AddedToken("<user>", single_word=True, normalized=False),
+    AddedToken("<assistant>", single_word=True, normalized=False),
+]
+tokenizer.train(
+    files="corpus.txt",
+    vocab_size=30000,
+    special_tokens=special_tokens
+)
+
+# ❌ BAD: Too many special tokens
+tokenizer.train(
+    files="corpus.txt",
+    vocab_size=1000,
+    special_tokens=[f"<special_{i}>" for i in range(500)]  # 50% of vocab!
+)
+
+# ❌ BAD: Forgetting essential tokens
+tokenizer.train(
+    files="corpus.txt",
+    vocab_size=30000,
+    special_tokens=[]  # No padding token! Will cause issues
+)
+
+# 💡 ORDER MATTERS: Special tokens get lowest IDs
+# special_tokens[0] gets ID 0, special_tokens[1] gets ID 1, etc.
+# Put <pad> first so it gets ID 0 (expected by many frameworks)
+```
+
+### 📋 Common Special Token Patterns:
+
+```python
+# Pattern 1: GPT-2/GPT-3 (minimalist)
+GPT2_SPECIAL = ["<|endoftext|>"]
+
+# Pattern 2: BERT (classification & masking)
+BERT_SPECIAL = ["<pad>", "<unk>", "<cls>", "<sep>", "<mask>"]
+
+# Pattern 3: T5 (seq2seq)
+T5_SPECIAL = ["<pad>", "<eos>", "<unk>"] + [f"<extra_id_{i}>" for i in range(100)]
+
+# Pattern 4: RoBERTa (similar to GPT-2 with byte-level)
+ROBERTA_SPECIAL = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"]
+
+# Pattern 5: Custom chatbot
+CHATBOT_SPECIAL = [
+    "<pad>",
+    "<|endoftext|>",
+    "<|im_start|>",  # Instruction/message start
+    "<|im_end|>",    # Instruction/message end
+]
+```
+
+---
+
+## 6. **`length`** (for `train_from_iterator()` only)
+
+### ✅ When to provide:
+- **Progress bar accuracy** - shows meaningful ETA
+- **Memory planning** - tokenizer can optimize
+- **Known dataset size** - you counted/estimated rows
+
+### ❌ When to omit (`None`):
+- **Unknown size** - streaming from API, database
+- **Infinite generators** - continuous data streams
+- **Quick scripts** - don't want to count
+
+```python
+# ✅ GOOD: Known length (best performance)
+def get_data():
+    with open("corpus.txt") as f:
+        for line in f:
+            yield line
+
+# Count lines first
+with open("corpus.txt") as f:
+    num_lines = sum(1 for _ in f)
+
+tokenizer.train_from_iterator(
+    iterator=get_data(),
+    vocab_size=30000,
+    length=num_lines  # Accurate progress bar
+)
+
+# ✅ GOOD: Estimated length (close enough)
+def estimate_lines(file_path, sample_size=1000):
+    """Estimate total lines by sampling"""
+    import os
+    file_size = os.path.getsize(file_path)
+    
+    with open(file_path) as f:
+        sample_bytes = 0
+        sample_lines = 0
+        for i, line in enumerate(f):
+            if i >= sample_size:
+                break
+            sample_bytes += len(line.encode())
+            sample_lines += 1
+    
+    avg_bytes_per_line = sample_bytes / sample_lines
+    estimated_lines = int(file_size / avg_bytes_per_line)
+    return estimated_lines
+
+length = estimate_lines("huge_corpus.txt")
+tokenizer.train_from_iterator(
+    iterator=get_data(),
+    vocab_size=30000,
+    length=length  # Good approximation
+)
+
+# ✅ GOOD: Database with count
+def db_iterator():
+    for record in database.query("SELECT text FROM corpus"):
+        yield record.text
+
+total_records = database.query("SELECT COUNT(*) FROM corpus")[0]
+
+tokenizer.train_from_iterator(
+    iterator=db_iterator(),
+    vocab_size=30000,
+    length=total_records
+)
+
+# ✅ ACCEPTABLE: Unknown length (no progress info)
+def streaming_api():
+    while True:
+        data = api.get_next_batch()
+        if not data:
+            break
+        for item in data:
+            yield item
+
+tokenizer.train_from_iterator(
+    iterator=streaming_api(),
+    vocab_size=30000,
+    length=None  # Can't know size in advance
+)
+
+# ❌ BAD: Wrong length (misleading progress bar)
+tokenizer.train_from_iterator(
+    iterator=get_data(),
+    vocab_size=30000,
+    length=100  # Actual length is 1M - progress bar will be wrong
+)
+```
+
+---
+
+## 📋 Complete Training Recipes
+
+### **Recipe 1: Standard Training (Most Common)**
+```python
+tokenizer = ByteLevelBPETokenizer(
+    add_prefix_space=True,
+    lowercase=False,
+    dropout=0.1,  # Regularization during training
+    unicode_normalizer="NFC"
+)
+
+tokenizer.train(
+    files=["train_data.txt"],
+    vocab_size=30000,      # Good default
+    min_frequency=2,       # Filter rare tokens
+    show_progress=True,    # See progress
+    special_tokens=["<pad>", "<|endoftext|>"]
+)
+
+# For inference, remove dropout
+tokenizer_inference = ByteLevelBPETokenizer(
+    vocab="vocab.json",
+    merges="merges.txt",
+    add_prefix_space=True,
+    dropout=None  # No dropout for inference
+)
+```
+
+### **Recipe 2: Large-Scale Training (Memory-Efficient)**
+```python
+def data_stream():
+    for file_path in glob.glob("data/*.txt"):
+        with open(file_path) as f:
+            for line in f:
+                yield line.strip()
+
+# Estimate total lines
+import os
+total_lines = 0
+for file_path in glob.glob("data/*.txt"):
+    with open(file_path) as f:
+        total_lines += sum(1 for _ in f)
+
+tokenizer = ByteLevelBPETokenizer(
+    add_prefix_space=True,
+    unicode_normalizer="NFC"
+)
+
+tokenizer.train_from_iterator(
+    iterator=data_stream(),
+    vocab_size=50000,      # Large vocab for diverse data
+    min_frequency=3,       # Higher threshold for cleaner vocab
+    show_progress=True,
+    special_tokens=["<pad>", "<unk>", "<|endoftext|>"],
+    length=total_lines
+)
+```
+
+### **Recipe 3: Multilingual Training**
+```python
+tokenizer = ByteLevelBPETokenizer(
+    add_prefix_space=True,
+    lowercase=False,  # Preserve case across languages
+    unicode_normalizer="NFC"  # Important for accented characters
+)
+
+tokenizer.train(
+    files=[
+        "corpus_en.txt",
+        "corpus_fr.txt",
+        "corpus_de.txt",
+        "corpus_es.txt",
+    ],
+    vocab_size=64000,  # Larger vocab for multiple languages
+    min_frequency=5,   # Higher threshold (more data)
+    show_progress=True,
+    special_tokens=[
+        "<pad>",
+        "<unk>",
+        "<s>",
+        "</s>",
+        "<lang_en>",  # Language markers
+        "<lang_fr>",
+        "<lang_de>",
+        "<lang_es>",
+    ]
+)
+```
+
+### **Recipe 4: Domain-Specific (Medical/Legal)**
+```python
+tokenizer = ByteLevelBPETokenizer(
+    add_prefix_space=False,  # Preserve exact formatting
+    lowercase=False,         # Medical codes are case-sensitive
+    unicode_normalizer="NFC"
+)
+
+tokenizer.train(
+    files="medical_records.txt",
+    vocab_size=20000,      # Smaller, specialized vocab
+    min_frequency=1,       # Keep rare medical terms
+    show_progress=True,
+    special_tokens=[
+        "<pad>",
+        "<unk>",
+        "<diagnosis>",     # Domain-specific markers
+        "<treatment>",
+        "<medication>",
+    ]
+)
+```
+
+### **Recipe 5: Noisy Social Media**
+```python
+tokenizer = ByteLevelBPETokenizer(
+    add_prefix_space=True,
+    lowercase=True,            # Normalize case
+    unicode_normalizer="NFKC",  # Aggressive normalization
+    dropout=0.2                # Higher regularization
+)
+
+tokenizer.train(
+    files="tweets.txt",
+    vocab_size=30000,
+    min_frequency=10,  # Filter typos and rare usernames
+    show_progress=True,
+    special_tokens=[
+        "<pad>",
+        "<|endoftext|>",
+        "<url>",       # Replace URLs
+        "<mention>",   # Replace @mentions
+        "<hashtag>",   # Replace #hashtags
+    ]
+)
+```
+
+---
+
+## 🎯 Key Takeaways
+
+1. **`vocab_size`**: 30k is standard; scale up for multilingual/diverse data
+2. **`min_frequency`**: 2 is default; increase (5-10) for noisy data
+3. **`special_tokens`**: Always include `<pad>` first (gets ID 0)
+4. **`show_progress`**: True for interactive, False for production
+5. **`files` vs `iterator`**: Use files when possible (simpler); iterator for streaming
+6. **`length`**: Provide when known for better progress tracking
+7. **Training vs Inference**: Use dropout during training, set to None for inference
