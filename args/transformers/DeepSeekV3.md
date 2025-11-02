@@ -1,756 +1,418 @@
-# Best Practices for DeepSeekV3Config Arguments (New/Unique Parameters)
+# DeepseekV3Config Quick Reference (MoE & LoRA Additions)
 
-I'll focus only on the **new arguments** that are NOT in GPT2Config, primarily related to **Mixture of Experts (MoE)** and **Multi-Query Attention with LoRA**.
+Focuses on the parameters that are **specific to DeepSeek‑V3** compared to GPT‑style configs. Defaults and behaviour are based on `transformers/models/deepseek_v3/configuration_deepseek_v3.py`, with code snippets adapted from `transformers/models/deepseek_v3/modeling_deepseek_v3.py`.
 
 ---
 
-## MoE (Mixture of Experts) Parameters
+## Mixture-of-Experts (MoE)
 
-### 1. **`n_shared_experts`** (default: 1)
+### `n_shared_experts` *(default 1)*
+- Number of experts that always process every token. Configured inside the MoE block.
 
-Number of experts that are **always active** for every token.
-
-#### ✅ When to use different values:
-
-**Small (1-2)**: Standard MoE
 ```python
-config = DeepseekV3Config(
-    n_shared_experts=1,  # Minimal shared capacity
-    n_routed_experts=256
+class DeepseekV3MoE(nn.Module):
+    def __init__(self, config):
+        # shared experts: dense backbone present for every token
+        self.shared_experts = DeepseekV3MLP(
+            config, intermediate_size=config.moe_intermediate_size * config.n_shared_experts
+        )
+
+    def forward(self, hidden_states):
+        residual = hidden_states
+        flat_states = hidden_states.view(-1, hidden_states.shape[-1])  # hidden_states: (batch, seq_len, hidden_size) -> flat_states: (batch*seq_len, hidden_size)
+        # topk_indices / topk_weights returned by the router (see sections below)
+        routed = self.experts(flat_states, topk_indices, topk_weights).view_as(hidden_states)
+        return routed + self.shared_experts(residual)    # shared experts always add capacity
+```
+
+**Guidance**
+- Leave at `1` for DeepSeek‑V3 behaviour.
+- Increase (2‑4) to stabilise very small models or noisy data.
+- Set to `0` only if you want a purely routed (fully sparse) model.
+
+---
+
+### `n_routed_experts` *(default 256)*
+- Total specialist experts owned by each MoE layer.
+- Router logits are shaped `(batch·seq_len, n_routed_experts)`; larger counts increase sparsity but require more data.
+
+```python
+self.gate = DeepseekV3TopkRouter(config)        # routing MLP
+self.experts = DeepseekV3NaiveMoe(config)       # ModuleList; config.num_local_experts == n_routed_experts
+
+router_logits = self.gate(hidden_states)        # (batch*seq_len, n_routed_experts)
+topk_idx, topk_w = self.route_tokens_to_experts(router_logits)
+flat_states = hidden_states.view(-1, hidden_states.shape[-1])      # hidden_states: (batch, seq_len, hidden_size) -> (batch*seq_len, hidden_size)
+routed_output = self.experts(flat_states, topk_idx, topk_w).view_as(hidden_states)
+```
+
+**Rule of thumb**: match model size to expert count (e.g. 8‑32 experts for small research models, 128‑256 for large runs).
+
+---
+
+### `num_experts_per_tok` *(default 8)*
+- How many routed experts each token uses (`self.top_k` in the MoE module).
+- Controls activation sparsity: smaller values → faster inference.
+
+After masking out inactive groups:
+
+```python
+self.top_k = config.num_experts_per_tok
+scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
+topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]  # (tokens, top_k)
+topk_weights = router_logits.gather(1, topk_indices)                                  # (tokens, top_k)
+```
+
+**Best practice**
+- Keep `num_experts_per_tok` ≪ `n_routed_experts` (1‑10%).
+- Ensure it is divisible by `topk_group` (see below) to keep groups balanced.
+
+---
+
+### `n_group` *(default 8)* and `topk_group` *(default 4)*
+- Experts are evenly split into `n_group` groups. At routing time, only `topk_group` groups are considered per token.
+
+```python
+group_scores = (
+    router_logits_for_choice.view(-1, self.n_group, self.n_routed_experts // self.n_group)
+    .topk(2, dim=-1)[0]
+    .sum(dim=-1)
+)  # (tokens, n_group)
+group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
+group_mask = torch.zeros_like(group_scores)
+group_mask.scatter_(1, group_idx, 1)
+score_mask = (
+    group_mask.unsqueeze(-1)
+    .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+    .reshape(-1, self.n_routed_experts)
 )
 ```
 
-**Medium (4-8)**: More stable training, better baseline
+**Constraints**
+- `n_routed_experts % n_group == 0` (integer experts per group).
+- `topk_group ≤ n_group`.
+- `num_experts_per_tok % topk_group == 0` ensures equal experts per chosen group.
+
+---
+
+### `norm_topk_prob` *(default True)*
+- Normalises routing weights so chosen experts receive probabilities that sum to 1.
+
 ```python
-config = DeepseekV3Config(
-    n_shared_experts=4,  # Stronger shared foundation
-    n_routed_experts=64
-)
+topk_weights = router_logits.gather(1, topk_indices)    # raw sigmoid weights
+if self.norm_topk_prob:
+    denominator = topk_weights.sum(dim=-1, keepdim=True).clamp(min=1e-20)
+    topk_weights = topk_weights / denominator
+topk_weights = topk_weights * self.routed_scaling_factor
 ```
 
-**Large (16+)**: Hybrid between dense and sparse
+Leave enabled unless experimenting with unnormalised routing.
+
+---
+
+### `routed_scaling_factor` *(default 2.5)*
+- Scales routed expert contributions before they are added back to the residual stream.
+- Higher values emphasise routed experts; lower values lean on shared experts.
+
 ```python
-config = DeepseekV3Config(
-    n_shared_experts=16,  # Nearly dense model
-    n_routed_experts=32   # Sparse component is small
-)
+topk_weights = topk_weights * config.routed_scaling_factor         # scale routed experts
+shared_output = self.shared_experts(residual)                      # always-on experts
+hidden_states = routed_output + shared_output                      # combine routed + shared
 ```
 
-#### 💡 Best Practices:
+Typical range: 1.5–3.0. The DeepSeek checkpoints use 2.5.
+
+---
+
+### `first_k_dense_replace` *(default 3)*
+- For the first `k` decoder layers, use a dense MLP instead of MoE (helps stability near the input).
 
 ```python
-# ✅ GOOD: Standard MoE setup (DeepSeek-V3 style)
-config = DeepseekV3Config(
-    n_shared_experts=1,      # Always-on experts
-    n_routed_experts=256,    # Specialist experts
-    num_experts_per_tok=8    # Select 8 routed experts per token
-)
-model = DeepseekV3Model(config)
+class DeepseekV3DecoderLayer(...):
+    if layer_idx >= config.first_k_dense_replace:
+        self.mlp = DeepseekV3MoE(config)
+    else:
+        self.mlp = DeepseekV3MLP(config)   # dense FFN
+```
 
-# ✅ GOOD: Small model with fewer experts
+Set to `0` for fully sparse models or to `num_hidden_layers` to disable MoE entirely.
+
+---
+
+### `moe_intermediate_size` *(default 2048)*
+- Hidden width of each routed/shared expert MLP (`DeepseekV3MLP` inside the MoE).
+- Total active capacity ≈ `moe_intermediate_size × num_experts_per_tok`.
+
+```python
+class DeepseekV3NaiveMoe(nn.ModuleList):
+    for _ in range(config.num_local_experts):
+        self.append(
+            DeepseekV3MLP(config, intermediate_size=config.moe_intermediate_size)
+        )
+```
+
+(`config.num_local_experts` is an alias for `n_routed_experts` supplied via the configuration attribute map.)
+
+Use larger values when you decrease the number of experts, so each expert retains enough capacity.
+
+---
+
+## LoRA-based Attention
+
+### `num_key_value_heads` *(default = `num_attention_heads`)*
+- Enables grouped-query attention by decoupling the number of key/value heads from total attention heads.
+
+```python
+self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+key_states = repeat_kv(key_states, self.num_key_value_groups)
+value_states = repeat_kv(value_states, self.num_key_value_groups)
+```
+
+- When `num_key_value_heads == num_attention_heads`, the layer falls back to standard multi-head attention.
+- Setting it to `1` yields multi-query attention (single KV head shared by all queries).
+- Intermediate values provide GQA with `num_key_value_groups` query heads per KV head.
+
+### `kv_lora_rank` *(default 512)*
+- Rank used to factorise key/value projections. If `None`, the model falls back to full-rank linear layers.
+
+```python
+self.kv_a_proj_with_mqa = nn.Linear(
+    hidden_size, kv_lora_rank + qk_rope_head_dim, bias=config.attention_bias
+)  # down projection
+self.kv_a_layernorm = DeepseekV3RMSNorm(kv_lora_rank)
+self.kv_b_proj = nn.Linear(
+    kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim), bias=False
+)  # up projection
+```
+
+Pick a rank that is ~5‑10% of the full KV dimension (`num_key_value_heads × (qk_rope_head_dim + v_head_dim)`).
+
+---
+
+### `q_lora_rank` *(default 1536)*
+- Low-rank factor for queries. Typically larger than the KV rank because queries drive attention scores.
+
+```python
+if config.q_lora_rank is None:
+    self.q_proj = nn.Linear(hidden_size, num_heads * qk_head_dim, bias=False)
+else:
+    self.q_a_proj = nn.Linear(hidden_size, q_lora_rank, bias=config.attention_bias)
+    self.q_a_layernorm = DeepseekV3RMSNorm(q_lora_rank)
+    self.q_b_proj = nn.Linear(q_lora_rank, num_heads * qk_head_dim, bias=False)
+```
+
+Common ratio: `q_lora_rank ≈ 2–3 × kv_lora_rank`.
+
+---
+
+### `qk_rope_head_dim` *(default 64)* and `qk_nope_head_dim` *(default 128)*
+- Split query/key dimensions into RoPE and non-RoPE portions. Total head dimension is their sum.
+
+```python
+q_states = q_states.view(query_shape).transpose(1, 2)
+q_pass, q_rot = torch.split(q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
+k_pass, k_rot = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass)).view(key_shape).transpose(1, 2)
+k_pass, value_states = torch.split(k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+cos, sin = position_embeddings
+if config.rope_interleave:
+    q_rot, k_rot = apply_rotary_pos_emb_interleave(q_rot, k_rot, cos, sin)
+else:
+    q_rot, k_rot = apply_rotary_pos_emb(q_rot, k_rot, cos, sin)
+k_rot = k_rot.expand(*k_pass.shape[:-1], -1)
+
+query_states = torch.cat((q_pass, q_rot), dim=-1)
+key_states = torch.cat((k_pass, k_rot), dim=-1)
+```
+
+RoPE dims handle positional awareness; non-RoPE dims emphasise semantic similarity. Adjust the split to bias one or the other.
+
+---
+
+### `v_head_dim` *(default 128)*
+- Value head width; can differ from the query/key head dimension.
+- When using flash attention, values are padded/truncated to match query/key width before softmax and then trimmed back.
+
+```python
+if self.config._attn_implementation == "flash_attention_2" and self.qk_head_dim != self.v_head_dim:
+    value_states = F.pad(value_states, [0, self.qk_head_dim - self.v_head_dim])
+...
+attn_output, attn_weights = attention_interface(..., dropout=self.attention_dropout, scaling=self.scaling)
+if self.config._attn_implementation == "flash_attention_2" and self.qk_head_dim != self.v_head_dim:
+    attn_output = attn_output[:, :, :, : self.v_head_dim]
+attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
+attn_output = self.o_proj(attn_output)
+```
+
+Tune `v_head_dim` to adjust output expressiveness without touching the attention scoring dimensions.
+
+---
+
+### `kv_lora_rank`, `q_lora_rank`, `qk_*`, `v_head_dim` Interaction
+- Effective attention shape per head:
+  - Query/key: `qk_rope_head_dim + qk_nope_head_dim`.
+  - Value: `v_head_dim`.
+- LoRA ranks factorise the heavy input projections (`hidden_size → num_heads × head_dim`).
+- Keep LoRA ranks below the full rank; if you set them ≥ full dimension you lose memory savings.
+
+---
+
+## Additional Decoder Settings
+
+### `rope_interleave` *(default True)*
+- Switches to the interleaved rotary helper for efficiency when enabled. Set to `False` if you prefer the standard RoPE kernel.
+
+```python
+if config.rope_interleave:
+    q_rot, k_rot = apply_rotary_pos_emb_interleave(q_rot, k_rot, cos, sin)
+else:
+    q_rot, k_rot = apply_rotary_pos_emb(q_rot, k_rot, cos, sin)
+```
+
+### `hidden_act` *(default `"silu"`)*
+- Activation used by the dense and expert MLPs.
+
+```python
+self.act_fn = ACT2FN[config.hidden_act]
+down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+```
+
+### `rms_norm_eps` *(default 1e-6)*
+- Epsilon for the RMSNorm layers that wrap self-attention and MLP blocks.
+
+```python
+self.input_layernorm = DeepseekV3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+self.post_attention_layernorm = DeepseekV3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+```
+
+### `attention_dropout` *(default 0.0)* and `attention_bias` *(default False)*
+- Dropout probability applied to attention weights during training, and a flag controlling whether the LoRA projections include bias terms.
+
+```python
+attn_output, attn_weights = attention_interface(
+    self,
+    query_states,
+    key_states,
+    value_states,
+    attention_mask,
+    dropout=0.0 if not self.training else self.attention_dropout,
+    scaling=self.scaling,
+)
+
+self.q_a_proj = nn.Linear(hidden_size, q_lora_rank, bias=config.attention_bias)
+```
+
+### `pretraining_tp` *(default 1)*
+- Tensor-parallel partition count used for weight initialisation or sharding-aware loading. Leave at `1` unless aligning with a tensor-parallel checkpoint.
+
+### `rope_scaling` / `rope_parameters`
+- Optional dictionary that tweaks RoPE behaviour (e.g. YaRN extrapolation). The configuration converts legacy keys to `self.rope_parameters` and validates them before constructing rotary embeddings.
+
+```python
+rope_scaling = kwargs.pop("rope_scaling", None)
+self.rope_parameters = rope_scaling or rope_parameters
+standardize_rope_params(self, rope_theta=kwargs.get("rope_theta", 10000.0))
+rope_config_validation(self)
+```
+
+### `max_position_embeddings` *(default 4096)*
+- Sets the maximum sequence length used to initialise rotary embeddings and caches.
+
+```python
+self.max_position_embeddings = max_position_embeddings
+rotary_emb = DeepseekV3RotaryEmbedding(config)  # uses config.max_position_embeddings
+```
+
+Internally, the rotary module keeps two trackers for dynamic context growth. During `forward`, the decorator reroutes control to `dynamic_frequency_update`, which compares the current sequence length to the cached limits and resizes the RoPE tables when needed:
+
+```python
+class DeepseekV3RotaryEmbedding(nn.Module):
+    def __init__(self, config, device=None):
+        self.max_seq_len_cached = config.max_position_embeddings
+        self.original_max_seq_len = config.max_position_embeddings
+
+    @dynamic_rope_update               # keep decorator in the real code
+    def forward(self, x, position_ids):
+        # pseudo-expansion of the decorator for illustration:
+        seq_len = torch.max(position_ids) + 1  # current request length
+        if seq_len > self.max_seq_len_cached:  
+            # longer than what we've cached so far → recompute RoPE tables and extend cache
+            inv_freq, self.attention_scaling = rope_init_fn(self.config, x.device, seq_len=seq_len)
+            self.register_buffer("inv_freq", inv_freq, persistent=False)
+            self.max_seq_len_cached = seq_len
+        if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:
+            # cache was previously extended beyond the pretrained length but we're back in-range → restore original tables to avoid precision drift
+            original_inv_freq = self.original_inv_freq.to(x.device)
+            self.register_buffer("inv_freq", original_inv_freq, persistent=False)
+            self.max_seq_len_cached = self.original_max_seq_len
+
+        cos, sin = compute_rope_tables(...)
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+```
+
+Here:
+- `seq_len > self.max_seq_len_cached` checks whether the current request is longer than anything we have cached; if so we regenerate the RoPE frequencies for the new, longer length and remember that size.
+- `seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len` detects the opposite situation: after having grown the cache past its original size, we are now back below the pretrained maximum, so we restore the original frequencies to avoid accumulating numerical error on short sequences.
+The decorator automatically upsizes the cached cosine/sine tables when you exceed the configured limit and resets them when you fall back below the original length, using the two stored values.
+
+### `initializer_range` *(default 0.02)*
+- Standard deviation used when initialising linear layers throughout the model.
+
+```python
+module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+```
+
+### `use_cache`, `pad_token_id`, `bos_token_id`, `eos_token_id`, `tie_word_embeddings`
+- Inherit the usual Hugging Face semantics (KV caching, special token IDs, tied embeddings). They mirror the GPT stack and are supported by the shared `PreTrainedModel` utilities.
+
+---
+
+## Routing & Cache Notes
+
+- The router treats every token independently with logits shaped `(batch·seq_len, n_routed_experts)`.
+- `past_key_values` (if caching) stores tensors shaped `(batch, num_heads, cached_seq_len, head_dim)`; concatenated when `use_cache=True`.
+- MoE layers appear in decoder blocks where `layer_idx ≥ first_k_dense_replace`.
+
+---
+
+## Example Setups
+
+### Compact Sparse Model
+```python
 config = DeepseekV3Config(
     hidden_size=1024,
-    n_shared_experts=2,      # 2 shared for stability
-    n_routed_experts=16,     # Fewer total experts
-    num_experts_per_tok=4    # Select fewer
-)
-
-# ✅ GOOD: Dense model (no MoE)
-config = DeepseekV3Config(
-    n_shared_experts=0,      # No shared experts
-    n_routed_experts=1,      # Only 1 expert = dense FFN
-    num_experts_per_tok=1    # Always use the 1 expert
-)
-
-# ⚠️ CAUTION: Too many shared experts
-config = DeepseekV3Config(
-    n_shared_experts=64,     # Too many = defeats purpose of MoE
-    n_routed_experts=256
-)
-# This becomes nearly dense, losing MoE benefits
-
-# 💡 RULE OF THUMB:
-# - n_shared_experts should be much smaller than n_routed_experts
-# - Ratio: n_shared / n_routed ≈ 1/64 to 1/16
-```
-
----
-
-### 2. **`n_routed_experts`** (default: 256)
-
-Total number of **specialist experts** that can be selected per token.
-
-#### ✅ Scaling guidelines:
-
-```python
-# ✅ GOOD: Tiny model (edge devices)
-config = DeepseekV3Config(
-    hidden_size=512,
-    n_routed_experts=8,      # Few experts
-    num_experts_per_tok=2,   # Select 2
-    moe_intermediate_size=512
-)
-
-# ✅ GOOD: Small model (research/prototyping)
-config = DeepseekV3Config(
-    hidden_size=2048,
-    n_routed_experts=32,     # Moderate
-    num_experts_per_tok=4,
-    moe_intermediate_size=1024
-)
-
-# ✅ GOOD: Large model (DeepSeek-V3 scale)
-config = DeepseekV3Config(
-    hidden_size=7168,
-    n_routed_experts=256,    # Many experts
-    num_experts_per_tok=8,
-    moe_intermediate_size=2048
-)
-
-# ❌ BAD: Tiny model with too many experts
-config = DeepseekV3Config(
-    hidden_size=256,
-    n_routed_experts=256,    # Experts won't be well-trained!
-    num_experts_per_tok=8
-)
-# Problem: Not enough capacity per expert
-
-# 💡 RULE OF THUMB:
-# - More experts = more specialization, but needs more data
-# - Experts should be trained on enough examples
-# - Typical: 8-256 experts for production models
-```
-
----
-
-### 3. **`num_experts_per_tok`** (default: 8)
-
-Number of experts **selected and activated** for each token.
-
-#### ✅ When to use different values:
-
-```python
-# ✅ GOOD: Sparse model (efficient inference)
-config = DeepseekV3Config(
-    n_routed_experts=256,
-    num_experts_per_tok=2,   # Very sparse, fast
-    topk_group=2
-)
-# Inference: 2/256 experts active = 0.78% activation
-
-# ✅ GOOD: Balanced (DeepSeek-V3 default)
-config = DeepseekV3Config(
-    n_routed_experts=256,
-    num_experts_per_tok=8,   # Good balance
-    topk_group=4
-)
-# Inference: 8/256 experts active = 3.1% activation
-
-# ✅ GOOD: Dense-like behavior
-config = DeepseekV3Config(
-    n_routed_experts=64,
-    num_experts_per_tok=32,  # Half of experts active
-    topk_group=8
-)
-# Inference: 32/64 = 50% activation
-
-# ❌ BAD: Too many experts per token
-config = DeepseekV3Config(
-    n_routed_experts=16,
-    num_experts_per_tok=15,  # Almost all experts!
-    topk_group=4
-)
-# Problem: Defeats purpose of MoE, no efficiency gain
-
-# 💡 RELATIONSHIP:
-# num_experts_per_tok should be:
-# - Much smaller than n_routed_experts (typically 1-10%)
-# - Multiple of topk_group (for even distribution)
-# - num_experts_per_tok = topk_group * (experts_per_group)
-```
-
----
-
-### 4. **`n_group`** (default: 8) and **`topk_group`** (default: 4)
-
-Group-based expert selection for load balancing.
-
-#### ✅ Understanding the hierarchy:
-
-```python
-# Expert organization:
-# n_routed_experts = 256 total experts
-# n_group = 8 groups
-# Each group has: 256 / 8 = 32 experts
-
-# Selection process:
-# topk_group = 4 groups selected
-# num_experts_per_tok = 8 experts total
-# Per selected group: 8 / 4 = 2 experts
-
-config = DeepseekV3Config(
-    n_routed_experts=256,    # Total experts
-    n_group=8,               # Divide into 8 groups (32 each)
-    topk_group=4,            # Select 4 groups
-    num_experts_per_tok=8    # Total 8 experts (2 per group)
-)
-```
-
-#### 💡 Best Practices:
-
-```python
-# ✅ GOOD: Balanced grouping (DeepSeek-V3)
-config = DeepseekV3Config(
-    n_routed_experts=256,
-    n_group=8,               # 32 experts per group
-    topk_group=4,            # Half groups selected
-    num_experts_per_tok=8    # 2 experts per selected group
-)
-# Ensures load balancing across groups
-
-# ✅ GOOD: Fine-grained control (more groups)
-config = DeepseekV3Config(
-    n_routed_experts=256,
-    n_group=16,              # 16 experts per group
-    topk_group=8,            # Select half
-    num_experts_per_tok=8    # 1 expert per selected group
-)
-# More flexible expert selection
-
-# ❌ BAD: Invalid configuration
-config = DeepseekV3Config(
-    n_routed_experts=256,
-    n_group=8,
-    topk_group=10,           # Can't select more groups than exist!
-    num_experts_per_tok=8
-)
-
-# ❌ BAD: Uneven distribution
-config = DeepseekV3Config(
-    n_routed_experts=256,
-    n_group=7,               # 256/7 = 36.57 (not integer!)
-    topk_group=3,
-    num_experts_per_tok=6
-)
-
-# 💡 CONSTRAINTS:
-# - n_routed_experts % n_group == 0 (even division)
-# - topk_group <= n_group (can't select more than exist)
-# - num_experts_per_tok % topk_group == 0 (even per group)
-# - num_experts_per_tok / topk_group <= n_routed_experts / n_group
-```
-
----
-
-### 5. **`routed_scaling_factor`** (default: 2.5)
-
-Scaling factor for routed expert outputs.
-```python
-# Simplified MoE output computation:
-output = shared_expert_output + routed_scaling_factor * routed_expert_output
-         ├─────────────────┘     ├──────────────────┘   ├──────────────────┘
-         Always active           Scaling factor          Dynamically selected
-         (baseline)              (amplify/dampen)        (specialists)
-```
-
-#### ✅ When to modify:
-
-```python
-# ✅ GOOD: Standard setup (DeepSeek-V3 default)
-config = DeepseekV3Config(
-    routed_scaling_factor=2.5,  # Empirically tuned
-    n_shared_experts=1,
-    n_routed_experts=256
-)
-
-# ✅ GOOD: Emphasize routed experts
-config = DeepseekV3Config(
-    routed_scaling_factor=3.0,  # Stronger specialist contribution
-    n_shared_experts=1,
-    n_routed_experts=256
-)
-
-# ✅ GOOD: Emphasize shared experts
-config = DeepseekV3Config(
-    routed_scaling_factor=1.5,  # Weaker specialist contribution
-    n_shared_experts=4,         # More shared capacity
-    n_routed_experts=64
-)
-
-# ⚠️ CAUTION: Extreme values
-config = DeepseekV3Config(
-    routed_scaling_factor=10.0,  # Too high, unstable training
-    n_shared_experts=1,
-    n_routed_experts=256
-)
-
-# 💡 GUIDANCE:
-# - Default 2.5 works well for most cases
-# - Lower (1.5-2.0): More balanced shared/routed
-# - Higher (3.0-4.0): More emphasis on specialization
-# - Rarely need to change from default
-```
-
----
-
-### 6. **`norm_topk_prob`** (default: True)
-
-Normalize expert selection probabilities.
-
-#### ✅ When to use:
-
-```python
-# ✅ GOOD: Standard MoE (recommended)
-config = DeepseekV3Config(
-    norm_topk_prob=True,  # Normalize weights to sum to 1
-    num_experts_per_tok=8
-)
-# Ensures stable training, weighted averaging
-
-# ⚠️ RARE: Unnormalized (research purposes)
-config = DeepseekV3Config(
-    norm_topk_prob=False,  # Raw routing weights
-    num_experts_per_tok=8
-)
-# May lead to scaling issues
-
-# 💡 BEST PRACTICE: Always use True unless researching routing mechanisms
-```
-
----
-
-### 7. **`first_k_dense_replace`** (default: 3)
-
-Number of initial layers that use **dense FFN** instead of MoE.
-
-#### ✅ When to use different values:
-
-```python
-# ✅ GOOD: Standard (DeepSeek-V3)
-config = DeepseekV3Config(
-    num_hidden_layers=61,
-    first_k_dense_replace=3,  # First 3 layers are dense
-    n_routed_experts=256
-)
-# Architecture: [dense, dense, dense, MoE, MoE, ..., MoE]
-
-# ✅ GOOD: More dense layers (stability)
-config = DeepseekV3Config(
-    num_hidden_layers=24,
-    first_k_dense_replace=6,  # First 6 layers dense
-    n_routed_experts=128
-)
-# Better for: smaller models, less stable training data
-
-# ✅ GOOD: All MoE (maximum efficiency)
-config = DeepseekV3Config(
-    num_hidden_layers=24,
-    first_k_dense_replace=0,  # All layers use MoE
-    n_routed_experts=64
-)
-# Most parameter efficient, but may be less stable
-
-# ✅ GOOD: All dense (debugging)
-config = DeepseekV3Config(
-    num_hidden_layers=12,
-    first_k_dense_replace=12,  # All layers dense
-    n_routed_experts=1  # MoE disabled
-)
-# Useful for debugging, baseline comparison
-
-# 💡 RULE OF THUMB:
-# - Shallow layers (near input): Dense for general features
-# - Deep layers (near output): MoE for specialization
-# - first_k_dense_replace ≈ 5-10% of num_hidden_layers
-```
-
----
-
-## LoRA-based Attention Parameters
-
-### 8. **`kv_lora_rank`** (default: 512)
-
-Low-rank dimension for **key and value** projections.
-
-```python
-# Traditional attention (high parameters):
-K = Linear(hidden_size → num_kv_heads * head_dim)  # e.g., 7168 → 128*192 = 24,576
-V = Linear(hidden_size → num_kv_heads * head_dim)  # e.g., 7168 → 128*192 = 24,576
-
-# DeepSeek-V3 with LoRA (low parameters):
-K = Linear(hidden_size → kv_lora_rank) @ Linear(kv_lora_rank → num_kv_heads * head_dim)
-    ├─────────────────────────────────┘   ├───────────────────────────────────────────┘
-    7168 → 512                            512 → 24,576
-    "Down projection"                     "Up projection"
-
-# Parameters saved:
-# Traditional: 7168 * 24,576 = 176M parameters
-# LoRA: (7168 * 512) + (512 * 24,576) = 3.67M + 12.6M = 16.3M parameters
-# Compression: 176M → 16.3M = 90.7% reduction!
-```
-
-#### ✅ When to use different values:
-
-```python
-# ✅ GOOD: Standard (DeepSeek-V3)
-config = DeepseekV3Config(
-    hidden_size=7168,
-    num_key_value_heads=128,
-    kv_lora_rank=512,     # Compress K, V through LoRA
-    qk_nope_head_dim=128,
-    qk_rope_head_dim=64
-)
-# Full rank would be: 128 heads * (128+64) = 24,576
-# LoRA rank: 512 (98% compression!)
-
-# ✅ GOOD: Higher rank (more capacity)
-config = DeepseekV3Config(
-    hidden_size=7168,
-    kv_lora_rank=1024,    # Less compression
-    num_key_value_heads=128
-)
-# Better accuracy, more parameters
-
-# ✅ GOOD: Lower rank (efficiency)
-config = DeepseekV3Config(
-    hidden_size=2048,
-    kv_lora_rank=256,     # More compression
-    num_key_value_heads=32
-)
-# Fewer parameters, faster inference
-
-# ❌ BAD: Rank too high (defeats purpose)
-config = DeepseekV3Config(
-    hidden_size=2048,
-    num_key_value_heads=32,
-    kv_lora_rank=4096,    # Higher than full rank!
-    qk_nope_head_dim=128
-)
-# No benefit, wastes parameters
-
-# 💡 RULE OF THUMB:
-# kv_lora_rank should be:
-# - Much smaller than num_key_value_heads * head_dim
-# - Typically 5-10% of full dimension
-# - Higher rank = better quality, more params
-```
-
----
-
-### 9. **`q_lora_rank`** (default: 1536)
-
-Low-rank dimension for **query** projection.
-
-```python
-# Traditional Q projection (high parameters):
-Q = Linear(hidden_size → num_heads * head_dim)  # 7168 → 128*192 = 24,576
-
-# DeepSeek-V3 with LoRA (low parameters):
-Q = Linear(hidden_size → q_lora_rank) @ Linear(q_lora_rank → num_heads * head_dim)
-    ├────────────────────────────────┘   ├──────────────────────────────────────┘
-    7168 → 1536                          1536 → 24,576
-    "Down projection"                    "Up projection"
-
-# Parameters:
-# Traditional: 7168 * 24,576 = 176M
-# LoRA: (7168 * 1536) + (1536 * 24,576) = 11M + 37.8M = 48.8M
-# Compression: 176M → 48.8M = 72.3% reduction
-```
-
-#### ✅ When to use different values:
-
-```python
-# ✅ GOOD: Standard (DeepSeek-V3)
-config = DeepseekV3Config(
-    hidden_size=7168,
-    num_attention_heads=128,
-    q_lora_rank=1536,     # Query compression
-    qk_nope_head_dim=128,
-    qk_rope_head_dim=64
-)
-# Full rank: 128 * (128+64) = 24,576
-# LoRA rank: 1536 (94% compression)
-
-# ✅ GOOD: Balanced compression
-config = DeepseekV3Config(
-    hidden_size=4096,
-    num_attention_heads=64,
-    q_lora_rank=1024,     # ~10% of full rank
-    kv_lora_rank=512      # Q rank > KV rank
-)
-# Q typically needs more capacity than K, V
-
-# ✅ GOOD: Small model
-config = DeepseekV3Config(
-    hidden_size=1024,
-    num_attention_heads=16,
-    q_lora_rank=256,
-    kv_lora_rank=128
-)
-
-# 💡 RELATIONSHIP:
-# - q_lora_rank should be >= kv_lora_rank
-# - Typical ratio: q_lora_rank ≈ 2-3 × kv_lora_rank
-# - Query needs more expressiveness than key/value
-```
-
----
-
-### 10. **`qk_rope_head_dim`** (default: 64)
-
-Dimension of Q/K that receives **rotary position embeddings**.
-
-#### Problem with Pure RoPE
-```python
-# If ALL dimensions use RoPE:
-Q_all_rope = apply_rope(Q, position)
-K_all_rope = apply_rope(K, position)
-
-attention_scores = Q_all_rope @ K_all_rope^T
-
-# Issue 1: Position information dominates
-# - Nearby tokens get high scores (just because they're near)
-# - Content similarity is underweighted
-# - Example: "The cat sat on the mat" 
-#   "cat" and "sat" are close → high score
-#   But "cat" should attend more to "mat" (object-location relationship)
-
-# Issue 2: Long-range dependencies suffer
-# - RoPE decays with distance
-# - Tokens far apart get low scores regardless of content
-# - Example: "The cat ... (100 words) ... the mat"
-#   Even if semantically related, position bias reduces attention
-```
-#### Solution: Hybrid Approach (RoPE + non-RoPE)
-```python
-# Split Q/K into two parts:
-Q = [Q_rope | Q_nope]
-    [64 dim | 128 dim]
-
-K = [K_rope | K_nope]
-    [64 dim | 128 dim]
-
-# Attention computation:
-attention_scores = (Q_rope @ K_rope^T) + (Q_nope @ K_nope^T)
-                   ├─────────────────┘   ├────────────────────┘
-                   Position-aware         Content-based
-                   (relative position)    (semantic similarity)
-
-# Benefits:
-# 1. Position-aware: Q_rope ⊗ K_rope captures relative positions
-# 2. Content-aware: Q_nope ⊗ K_nope captures semantic similarity
-# 3. Balanced: Model learns appropriate weighting
-# 4. Flexible: Can attend based on position OR content
-```
-
-#### ✅ When to use different values:
-
-```python
-# ✅ GOOD: Standard (DeepSeek-V3)
-config = DeepseekV3Config(
-    qk_rope_head_dim=64,    # 64 dims get RoPE
-    qk_nope_head_dim=128,   # 128 dims no RoPE
-    v_head_dim=128,
-    num_attention_heads=128
-)
-# Total Q/K head dim = 64 + 128 = 192
-# V head dim = 128 (independent)
-
-# ✅ GOOD: All dimensions use RoPE
-config = DeepseekV3Config(
-    qk_rope_head_dim=128,   # All Q/K uses RoPE
-    qk_nope_head_dim=0,     # No non-RoPE component
-    v_head_dim=128
-)
-# Like standard RoPE attention
-
-# ✅ GOOD: No RoPE (absolute positions)
-config = DeepseekV3Config(
-    qk_rope_head_dim=0,     # No RoPE
-    qk_nope_head_dim=192,   # All Q/K is absolute
-    v_head_dim=128
-)
-# Might use learned position embeddings instead
-
-# 💡 DESIGN CHOICE:
-# - Separate RoPE and non-RoPE allows hybrid positioning
-# - RoPE part: relative position encoding
-# - Non-RoPE part: content-based attention
-# - DeepSeek-V3 uses hybrid for flexibility
-```
-
----
-
-### 11. **`qk_nope_head_dim`** (default: 128)
-
-Dimension of Q/K that does **NOT** use RoPE (content-based).
-
-```python
-# ✅ GOOD: Hybrid attention (DeepSeek-V3)
-config = DeepseekV3Config(
-    qk_rope_head_dim=64,     # Position-aware
-    qk_nope_head_dim=128,    # Content-aware
-    v_head_dim=128
-)
-# Total attention balances position and content
-
-# ✅ GOOD: More position emphasis
-config = DeepseekV3Config(
-    qk_rope_head_dim=128,    # More position info
-    qk_nope_head_dim=64,     # Less content info
-    v_head_dim=128
-)
-
-# ✅ GOOD: More content emphasis
-config = DeepseekV3Config(
-    qk_rope_head_dim=32,     # Less position info
-    qk_nope_head_dim=160,    # More content info
-    v_head_dim=128
-)
-
-# 💡 TRADE-OFF:
-# - Higher qk_rope_head_dim: Better position awareness
-# - Higher qk_nope_head_dim: Better content matching
-# - Total: qk_head_dim = qk_rope_head_dim + qk_nope_head_dim
-```
-
----
-
-### 12. **`v_head_dim`** (default: 128)
-
-Dimension of **value** heads (independent from Q/K).
-
-```python
-# ✅ GOOD: Standard (DeepSeek-V3)
-config = DeepseekV3Config(
-    qk_rope_head_dim=64,
-    qk_nope_head_dim=128,    # Q/K total = 192
-    v_head_dim=128,          # V = 128 (different!)
-    num_attention_heads=128
-)
-# Allows Q/K and V to have different capacities
-
-# ✅ GOOD: Larger value dimension
-config = DeepseekV3Config(
-    qk_rope_head_dim=64,
-    qk_nope_head_dim=64,     # Q/K total = 128
-    v_head_dim=256,          # V = 256 (larger)
-    num_attention_heads=64
-)
-# More expressive output representations
-
-# ✅ GOOD: Match Q/K dimension
-config = DeepseekV3Config(
-    qk_rope_head_dim=64,
-    qk_nope_head_dim=64,     # Q/K total = 128
-    v_head_dim=128,          # V = 128 (same)
-    num_attention_heads=32
-)
-# Traditional attention (Q, K, V same dim)
-
-# 💡 FLEXIBILITY:
-# - DeepSeek-V3 decouples V from Q/K dimensions
-# - Allows independent tuning of attention computation
-# - v_head_dim affects output representation capacity
-```
-
----
-
-## MoE Parameters
-
-### 13. **`moe_intermediate_size`** (default: 2048)
-
-Hidden dimension of **each expert's FFN** (routed experts).
-
-```python
-# ✅ GOOD: DeepSeek-V3 scale
-config = DeepseekV3Config(
-    hidden_size=7168,
-    intermediate_size=18432,      # Dense FFN size
-    moe_intermediate_size=2048,   # Each expert FFN size
-    n_routed_experts=256,
-    num_experts_per_tok=8
-)
-# Each expert is much smaller than dense FFN
-# Total: 2048 * 8 active = 16,384 (comparable to dense)
-
-# ✅ GOOD: Larger experts (more capacity per expert)
-config = DeepseekV3Config(
-    hidden_size=4096,
-    moe_intermediate_size=4096,   # Larger experts
-    n_routed_experts=64,
-    num_experts_per_tok=4
-)
-
-# ✅ GOOD: Smaller experts (more specialization)
-config = DeepseekV3Config(
-    hidden_size=2048,
-    moe_intermediate_size=512,    # Tiny experts
-    n_routed_experts=128,
-    num_experts_per_tok=8
-)
-
-# 💡 TRADE-OFF:
-# - Larger moe_intermediate_size: More capacity per expert
-# - Smaller moe_intermediate_size: More specialization, more experts needed
-# - Total capacity: moe_intermediate_size * num_experts_per_tok
-```
-
----
-
-## Complete Example Configurations
-
-### **Example 1: Small Efficient Model**
-
-```python
-config = DeepseekV3Config(
-    vocab_size=50000,
-    hidden_size=1024,
-    intermediate_size=2048,       # Dense FFN
-    moe_intermediate_size=512,    # Expert FFN
     num_hidden_layers=12,
     num_attention_heads=16,
-    num_key_value_heads=4,        # GQA (4 KV heads)
-    
-    # MoE settings
+
     n_shared_experts=1,
     n_routed_experts=16,
     num_experts_per_tok=4,
     n_group=4,
     topk_group=2,
     routed_scaling_factor=2.0,
-    first_k_dense_replace=2,      # First 2 layers dense
-    
-    # LoRA attention
+    first_k_dense_replace=2,
+
     kv_lora_rank=128,
     q_lora_rank=256,
     qk_rope_head_dim=32,
     qk_nope_head_dim=64,
     v_head_dim=64,
-    
-    max_position_embeddings=2048,
-    rope_theta=10000.0,
 )
-
-model = DeepseekV3Model(config)
-print(f"Parameters: {model.num_parameters():,}")
 ```
 
----
-
-### **Example 2: Large Production Model (DeepSeek-V3 Style)**
-
+### DeepSeek‑V3 Reference
 ```python
 config = DeepseekV3Config(
-    vocab_size=129280,
     hidden_size=7168,
     intermediate_size=18432,
     moe_intermediate_size=2048,
     num_hidden_layers=61,
     num_attention_heads=128,
-    num_key_value_heads=128,      # MHA
-    
-    # MoE settings (large scale)
+    num_key_value_heads=128,
+
     n_shared_experts=1,
     n_routed_experts=256,
     num_experts_per_tok=8,
@@ -759,59 +421,36 @@ config = DeepseekV3Config(
     routed_scaling_factor=2.5,
     first_k_dense_replace=3,
     norm_topk_prob=True,
-    
-    # LoRA attention
+
     kv_lora_rank=512,
     q_lora_rank=1536,
     qk_rope_head_dim=64,
     qk_nope_head_dim=128,
     v_head_dim=128,
-    
-    max_position_embeddings=4096,
-    rope_theta=10000.0,
-    rope_scaling={"type": "yarn", "factor": 2.0},
 )
-
-model = DeepseekV3Model(config)
 ```
 
----
-
-### **Example 3: Dense Model (No MoE for Comparison)**
-
+### Dense Baseline (MoE Disabled)
 ```python
 config = DeepseekV3Config(
-    vocab_size=50000,
-    hidden_size=2048,
-    intermediate_size=8192,       # Dense FFN
     num_hidden_layers=24,
-    num_attention_heads=32,
-    num_key_value_heads=32,
-    
-    # Disable MoE
     n_shared_experts=0,
-    n_routed_experts=1,           # Single "expert" = dense
+    n_routed_experts=1,
     num_experts_per_tok=1,
-    first_k_dense_replace=24,     # All layers dense
-    
-    # Standard attention (no LoRA)
-    kv_lora_rank=None,  # Will use default or full rank
+    first_k_dense_replace=24,     # matches num_hidden_layers for a fully dense stack
+
+    kv_lora_rank=None,
     q_lora_rank=None,
-    qk_rope_head_dim=64,
-    qk_nope_head_dim=0,           # All dims use RoPE
-    v_head_dim=64,
 )
 ```
 
 ---
 
-## 🎯 Key Takeaways
+## Key Reminders
 
-1. **MoE Hierarchy**: `n_routed_experts` > `n_group` > `topk_group` > `num_experts_per_tok`
-2. **Expert Selection**: Constrain by groups for load balancing
-3. **Dense Layers**: Use `first_k_dense_replace` for stable shallow layers
-4. **LoRA Ranks**: `q_lora_rank` ≈ 2-3× `kv_lora_rank` (Q needs more capacity)
-5. **Hybrid Attention**: Split Q/K into RoPE (`qk_rope_head_dim`) and content (`qk_nope_head_dim`)
-6. **Scaling**: Adjust `routed_scaling_factor` to balance shared vs. routed experts
-7. **Efficiency**: More experts + lower `num_experts_per_tok` = sparse, efficient
-8. **Specialization**: Lower `moe_intermediate_size` = more specialized experts
+1. **MoE hierarchy**: `n_routed_experts` → split via `n_group` → pruned by `topk_group` → final `num_experts_per_tok`.
+2. **Routing stability**: keep `norm_topk_prob=True` and use a sane `routed_scaling_factor`.
+3. **Dense warm-up**: use `first_k_dense_replace` to stabilise early layers.
+4. **LoRA ranks**: choose ranks well below full dimension; keep `q_lora_rank ≥ kv_lora_rank`.
+5. **Hybrid attention**: `qk_rope_head_dim` vs `qk_nope_head_dim` lets you balance positional vs content signals.
+6. **Expert capacity**: product `moe_intermediate_size × num_experts_per_tok` should stay comparable to a dense FFN of similar size.
