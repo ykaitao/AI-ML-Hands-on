@@ -306,7 +306,7 @@ self.q_a_proj = nn.Linear(hidden_size, q_lora_rank, bias=config.attention_bias)
 ```
 
 ### `pretraining_tp` *(default 1)*
-- Tensor-parallel partition count used for weight initialisation or sharding-aware loading. Leave at `1` unless aligning with a tensor-parallel checkpoint.
+- pretraining_tp is a compatibility flag for loading checkpoints that were saved from a tensor-parallel (TP) pretraining run. During Megatron‑style TP pretraining the large linear layers are physically split across multiple ranks; when Hugging Face Transformers loads one of those checkpoints it needs to know how many splits to expect so it can stitch them back together. Set it to the number of tensor-parallel partitions used when the checkpoint was produced (e.g. 2, 4, 8). If you are training or fine-tuning normally—without importing a TP-sharded checkpoint—leave it at 1.
 
 ### `rope_scaling` / `rope_parameters`
 - Optional dictionary that tweaks RoPE behaviour (e.g. YaRN extrapolation). The configuration converts legacy keys to `self.rope_parameters` and validates them before constructing rotary embeddings.
@@ -337,6 +337,7 @@ class DeepseekV3RotaryEmbedding(nn.Module):
     @dynamic_rope_update               # keep decorator in the real code
     def forward(self, x, position_ids):
         # pseudo-expansion of the decorator for illustration:
+        # RoPE tables are indexed by absolute position, and the position_ids tensor is zero-based.
         seq_len = torch.max(position_ids) + 1  # current request length
         if seq_len > self.max_seq_len_cached:  
             # longer than what we've cached so far → recompute RoPE tables and extend cache
