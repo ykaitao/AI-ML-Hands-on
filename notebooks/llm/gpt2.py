@@ -15,6 +15,8 @@
 
 # %% Imports
 import os
+from pathlib import Path
+
 import torch
 from transformers import (
     GPT2TokenizerFast,
@@ -28,7 +30,13 @@ from datasets import load_dataset
 import matplotlib.pyplot as plt
 
 # %% Load dataset
-dataset = load_dataset("text", data_files="./data_examples/the-verdict.txt")
+# Get the directory where this script is located
+script_dir = Path(__file__).parent
+data_file = (script_dir / "data_examples/the-verdict.txt").__str__()
+tokenizer_dir = (script_dir / "tokenizers/verdict_tokenizer").__str__()
+output_dir = (script_dir / "models/gpt2-small-verdict").__str__()
+
+dataset = load_dataset("text", data_files=data_file)
 
 # Split train/validation if validation not already in dataset
 if "validation" not in dataset:
@@ -66,13 +74,12 @@ device_type, optim_type = (
 print(f"Device: {device_type}, Optimizer: {optim_type}")
 
 # %% Tokenizer: Train or load
-tokenizer_dir = "./tokenizers/verdict_tokenizer"
 
 if not os.path.exists(tokenizer_dir):
     print("Training new tokenizer...")
     tokenizer = ByteLevelBPETokenizer()
     tokenizer.train(
-        files="./data_examples/the-verdict.txt",
+        files=data_file,
         vocab_size=1500,
         min_frequency=2,
         special_tokens=["<s>", "<pad>", "</s>", "<unk>", "<mask>"],
@@ -95,12 +102,18 @@ print(f"\nTokenizer ready. Vocab size: {len(tokenizer)}")
 sample = tokenizer.encode("I love large language models")
 print("Encoded:", sample)
 print("Decoded:", tokenizer.decode(sample))
+print(
+    "Decoded one training entry:",
+    tokenizer.decode(
+        [16, 310, 966, 286, 283, 263, 981, 289, 580, 793, 17, 81, 957, 300, 305, 593]
+    ),
+)
 
 # %% Model setup (small GPT-2)
 # Note: small sizes are for educational purposes only
 config = GPT2Config(
     vocab_size=len(tokenizer),
-    n_positions=16,  # must be >= block_size
+    n_positions=32,
     n_embd=16,
     n_layer=2,
     n_head=2,
@@ -111,15 +124,15 @@ print(model)
 
 
 # %% Tokenize & group text into blocks
-def tokenize_fn(examples):
-    return tokenizer(examples["text"])
-
-
-tokenized = dataset.map(tokenize_fn, batched=True, remove_columns=["text"])
+tokenized = dataset.map(
+    lambda x: tokenizer(x["text"]),
+    batched=True,
+    remove_columns=["text"],
+)
 tokenized = tokenized.filter(lambda x: len(x["input_ids"]) > 0)
 
 # Chunk sequences into fixed-length blocks
-block_size = 16
+block_size = config.n_positions  # block_size should <= config.n_positions
 
 
 def group_texts(examples):
@@ -142,15 +155,9 @@ for split in lm_datasets:
         assert col in lm_datasets[split].features
 print("\nDataset ready for training!")
 
-# Optional: plot sequence length histogram
-seq_lengths = [len(x) for x in lm_datasets["train"]["input_ids"]]
-plt.hist(seq_lengths, bins=20)
-plt.title("Token Sequence Length Distribution")
-plt.show()
-
 # %% Training
 training_args = TrainingArguments(
-    output_dir="./models/gpt2-small-verdict",
+    output_dir=output_dir,
     eval_strategy="epoch",
     learning_rate=2e-5,
     per_device_train_batch_size=8,
@@ -172,6 +179,27 @@ trainer = Trainer(
 )
 
 print("\nStarting training...")
+""" Stepwise Debugging:
+    1. Open the file: .venv/lib/python3.11/site-packages/transformers/models/gpt2/modeling_gpt2.py
+    2. Set a break point at the function forward() of class GPT2Model
+"""
+
+"""Code snippet for verifing:
+`nn.functional.cross_entropy(source, target, ignore_index=ignore_index, reduction=reduction)`
+
+import numpy as np
+
+t = target.cpu().numpy()
+s = source.cpu().detach().numpy()
+tt = t[t!=ignore_index]
+ss = s[t!=ignore_index]
+ss_e = np.exp(ss)
+ss_e_sum = ss_e.sum(axis=1, keepdims=True)
+p = ss_e / ss_e_sum
+sum([-np.log(p[i][j]) for i, j in enumerate(tt)])
+
+"""
+
 trainer.train()
 
 results = trainer.evaluate()
