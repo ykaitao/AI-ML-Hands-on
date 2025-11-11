@@ -1,6 +1,13 @@
 accelerate
+bitsandbytes==0.42.0
 datasets
+diffusers
 ipykernel
 matplotlib
 torch
 transformers
+trl==0.23.0
+unsloth_zoo
+vllm
+# Install unsloth separately with: pip install unsloth --no-deps
+
