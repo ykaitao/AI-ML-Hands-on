@@ -8,7 +8,11 @@
             "program": "${file}",  // Debug currently active file
             "console": "integratedTerminal",
             "justMyCode": false,
-            "stopOnEntry": false
+            "stopOnEntry": false,
+            "subProcess": true,
+            "env": {
+                "PYDEVD_DISABLE_FILE_VALIDATION": "1"
+            }
         }
     ]
 }
