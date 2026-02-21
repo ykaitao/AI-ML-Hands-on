@@ -143,7 +143,8 @@ print("\nDataset ready for training!")
 
 
 # %% Model setup (small GPT-2)
-# Note: small sizes are for educational purposes only
+# GPT and Llama disgrams: https://github.com/rasbt/LLMs-from-scratch/tree/main/ch05/07_gpt_to_llama
+
 config = GPT2Config(
     vocab_size=len(tokenizer),
     n_positions=block_size,  # config.n_positions >= block_size
