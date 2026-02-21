@@ -1,5 +1,6 @@
 accelerate
 bitsandbytes==0.42.0
+black[jupyter]==26.1.0
 datasets
 diffusers
 ipykernel

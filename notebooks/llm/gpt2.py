@@ -109,20 +109,6 @@ print(
     ),
 )
 
-# %% Model setup (small GPT-2)
-# Note: small sizes are for educational purposes only
-config = GPT2Config(
-    vocab_size=len(tokenizer),
-    n_positions=32,
-    n_embd=16,
-    n_layer=2,
-    n_head=2,
-)
-model = GPT2LMHeadModel(config)
-print("\nModel initialized.")
-print(model)
-
-
 # %% Tokenize & group text into blocks
 tokenized = dataset.map(
     lambda x: tokenizer(x["text"]),
@@ -132,7 +118,7 @@ tokenized = dataset.map(
 tokenized = tokenized.filter(lambda x: len(x["input_ids"]) > 0)
 
 # Chunk sequences into fixed-length blocks
-block_size = config.n_positions  # block_size should <= config.n_positions
+block_size = 32
 
 
 def group_texts(examples):
@@ -154,6 +140,21 @@ for split in lm_datasets:
     for col in ["input_ids", "attention_mask", "labels"]:
         assert col in lm_datasets[split].features
 print("\nDataset ready for training!")
+
+
+# %% Model setup (small GPT-2)
+# Note: small sizes are for educational purposes only
+config = GPT2Config(
+    vocab_size=len(tokenizer),
+    n_positions=block_size,  # config.n_positions >= block_size
+    n_embd=16,
+    n_layer=2,
+    n_head=2,
+)
+model = GPT2LMHeadModel(config)
+print("\nModel initialized.")
+print(model)
+
 
 # %% Training
 training_args = TrainingArguments(
