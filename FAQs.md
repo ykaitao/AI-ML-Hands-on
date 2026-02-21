@@ -1,4 +1,4 @@
-# When do we need "Train on assistant messages only" and why?
+# [SFT](https://huggingface.co/docs/trl/main/en/sft_trainer): When do we need "Train on assistant messages only" and why?
 
 **Short Answer:**  
 Training on assistant-only messages is preferred for building modern instruction-following LLMs.
@@ -16,7 +16,7 @@ Focusing training on assistant messages leads to more reliable, efficient, and h
 
 ---
 
-# What is the difference between "Train on assistant messages only" and "Train on completion only "?
+# [SFT](https://huggingface.co/docs/trl/main/en/sft_trainer): What is the difference between "Train on assistant messages only" and "Train on completion only "?
 
 🟢 Summary (short version)
 
@@ -30,7 +30,7 @@ They may look similar, but they apply to **different dataset formats** and suppo
 
 ---
 
-# What is the difference trainer = SFTTrainer( "Qwen/Qwen3-0.6B", ...), and trainer = SFTTrainer( model=model, ...)?
+# [SFT](https://huggingface.co/docs/trl/main/en/sft_trainer): What is the difference trainer = SFTTrainer( "Qwen/Qwen3-0.6B", ...), and trainer = SFTTrainer( model=model, ...)?
 
 | Parameter passed        | What happens                                              | Use when                                                                   |
 | ----------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------- |
@@ -39,7 +39,7 @@ They may look similar, but they apply to **different dataset formats** and suppo
 
 ---
 
-# If I want to apply LoRA adapters, must I go for the "pass a model object" approach?
+# [SFT](https://huggingface.co/docs/trl/main/en/sft_trainer): If I want to apply LoRA adapters, must I go for the "pass a model object" approach?
 
  🟦 SHORT ANSWER
 
@@ -91,4 +91,8 @@ trainer = SFTTrainer(
 )
 ```
 
+---
+
+---
+---
 ---
