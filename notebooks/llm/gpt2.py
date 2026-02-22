@@ -143,7 +143,7 @@ print("\nDataset ready for training!")
 
 
 # %% Model setup (small GPT-2)
-# GPT and Llama disgrams: https://github.com/rasbt/LLMs-from-scratch/tree/main/ch05/07_gpt_to_llama
+# GPT and Llama diagrams: https://github.com/rasbt/LLMs-from-scratch/tree/main/ch05/07_gpt_to_llama
 
 config = GPT2Config(
     vocab_size=len(tokenizer),
@@ -183,7 +183,7 @@ trainer = Trainer(
 print("\nStarting training...")
 """ Stepwise Debugging:
     1. Open the file: .venv/lib/python3.11/site-packages/transformers/models/gpt2/modeling_gpt2.py
-    2. Set a break point at the function forward() of class GPT2Model
+    2. Set a break point at the function forward() of class GPT2Model and class GPT2Block
 """
 
 """Code snippet for verifing:
