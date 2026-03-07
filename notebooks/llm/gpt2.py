@@ -152,6 +152,7 @@ config = GPT2Config(
     n_layer=2,
     n_head=2,
 )
+config._attn_implementation = "eager"  # Add this line to use eager mode
 model = GPT2LMHeadModel(config)
 print("\nModel initialized.")
 print(model)
