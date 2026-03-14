@@ -1,17 +1,17 @@
 # %% [markdown]
-# # Hands-on GPT-2 Mini Workshop
+# # Hands-on LLaMA (Llama-3) Mini Workshop
 #
 # In this notebook, you'll learn step-by-step how to:
 # 1. Load a text dataset
 # 2. Train or load a tokenizer
-# 3. Prepare data for a small GPT-2 model
+# 3. Prepare data for a small LLaMA model
 # 4. Train and evaluate the model
 # 5. Generate text
 #
 # This is designed for **educational purposes** — all sizes are small for fast experimentation.
 
 # %% Install libraries
-# !pip install -q transformers datasets accelerate --upgrade
+# !pip install -q transformers datasets accelerate sentencepiece --upgrade
 
 # %% Imports
 import os
@@ -19,13 +19,13 @@ from pathlib import Path
 
 import torch
 from transformers import (
-    GPT2TokenizerFast,
-    GPT2Config,
-    GPT2LMHeadModel,
+    LlamaConfig,
+    LlamaForCausalLM,
+    LlamaTokenizer,
     Trainer,
     TrainingArguments,
 )
-from tokenizers import ByteLevelBPETokenizer
+import sentencepiece as spm
 from datasets import load_dataset
 import matplotlib.pyplot as plt
 
@@ -33,8 +33,8 @@ import matplotlib.pyplot as plt
 # Get the directory where this script is located
 script_dir = Path(__file__).parent
 data_file = (script_dir / "data_examples/the-verdict.txt").__str__()
-tokenizer_dir = (script_dir / "tokenizers/verdict_tokenizer").__str__()
-output_dir = (script_dir / "models/gpt2-small-verdict").__str__()
+tokenizer_dir = (script_dir / "tokenizers/verdict_llama_tokenizer").__str__()
+output_dir = (script_dir / "models/llama3-small-verdict").__str__()
 
 dataset = load_dataset("text", data_files=data_file)
 
@@ -75,24 +75,25 @@ print(f"Device: {device_type}, Optimizer: {optim_type}")
 
 # %% Tokenizer: Train or load
 
-if not os.path.exists(tokenizer_dir):
-    print("Training new tokenizer...")
-    tokenizer = ByteLevelBPETokenizer()
-    tokenizer.train(
-        files=data_file,
-        vocab_size=1500,
-        min_frequency=2,
-        special_tokens=["<s>", "<pad>", "</s>", "<unk>", "<mask>"],
-    )
-    os.makedirs(tokenizer_dir, exist_ok=True)
-    tokenizer.save_model(tokenizer_dir)
-    # Convert to Hugging Face tokenizer
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
-else:
-    print("Loading existing tokenizer...")
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
+spm_model_path = os.path.join(tokenizer_dir, "llama.model")
 
-# Set special tokens
+if not os.path.exists(spm_model_path):
+    print("Training new SentencePiece tokenizer...")
+    os.makedirs(tokenizer_dir, exist_ok=True)
+    spm.SentencePieceTrainer.Train(
+        input=data_file,
+        model_prefix=os.path.join(tokenizer_dir, "llama"),
+        vocab_size=1187,
+        character_coverage=1.0,
+        model_type="unigram",
+        user_defined_symbols=["<s>", "</s>", "<pad>", "<mask>"]
+    )
+
+# Load LLaMA tokenizer
+print("Loading tokenizer...")
+tokenizer = LlamaTokenizer(vocab_file=spm_model_path)
+
+# Ensure special tokens are set
 tokenizer.pad_token = "<pad>"
 tokenizer.eos_token = "</s>"
 tokenizer.bos_token = "<s>"
@@ -102,12 +103,6 @@ print(f"\nTokenizer ready. Vocab size: {len(tokenizer)}")
 sample = tokenizer.encode("I love large language models")
 print("Encoded:", sample)
 print("Decoded:", tokenizer.decode(sample))
-print(
-    "Decoded one training entry:",
-    tokenizer.decode(
-        [16, 310, 966, 286, 283, 263, 981, 289, 580, 793, 17, 81, 957, 300, 305, 593]
-    ),
-)
 
 # %% Tokenize & group text into blocks
 tokenized = dataset.map(
@@ -142,18 +137,17 @@ for split in lm_datasets:
 print("\nDataset ready for training!")
 
 
-# %% Model setup (small GPT-2)
+# %% Model setup (small LLaMA)
 # GPT and Llama diagrams: https://github.com/rasbt/LLMs-from-scratch/tree/main/ch05/07_gpt_to_llama
 
-config = GPT2Config(
+config = LlamaConfig(
     vocab_size=len(tokenizer),
-    n_positions=block_size,  # config.n_positions >= block_size
-    n_embd=16,
-    n_layer=2,
-    n_head=2,
+    max_position_embeddings=block_size,  # config.max_position_embeddings >= block_size
+    hidden_size=16,
+    num_hidden_layers=2,
+    num_attention_heads=2,
 )
-config._attn_implementation = "eager"  # Add this line to use eager mode
-model = GPT2LMHeadModel(config)
+model = LlamaForCausalLM(config)
 print("\nModel initialized.")
 print(model)
 
@@ -182,26 +176,6 @@ trainer = Trainer(
 )
 
 print("\nStarting training...")
-""" Stepwise Debugging:
-    1. Open the file: .venv/lib/python3.11/site-packages/transformers/models/gpt2/modeling_gpt2.py
-    2. Set a break point at the function forward() of class GPT2Model and class GPT2Block
-"""
-
-"""Code snippet for verifing:
-`ForCausalLMLoss in .venv/lib/python3.11/site-packages/transformers/loss/loss_utils.py`
-
-import numpy as np
-
-t = shift_labels.cpu().numpy()
-s = logits.cpu().detach().numpy()
-tt = t[t!=ignore_index]
-ss = s[t!=ignore_index]
-ss_e = np.exp(ss)
-ss_e_sum = ss_e.sum(axis=1, keepdims=True)
-p = ss_e / ss_e_sum
-sum([-np.log(p[i][j]) for i, j in enumerate(tt)]) / num_items_in_batch
-
-"""
 
 trainer.train()
 
@@ -227,7 +201,7 @@ for o in outputs:
     print(tokenizer.decode(o, skip_special_tokens=True))
 
 # %% Optional exercises for students
-# 1. Modify `block_size` and `n_positions` and observe effects
+# 1. Modify `block_size` and `max_position_embeddings` and observe effects
 # 2. Try different `top_k` or `top_p` for generation
 # 3. Train on a small custom corpus (your own short stories)
 # 4. Compare greedy vs. sampling vs. beam search generation
