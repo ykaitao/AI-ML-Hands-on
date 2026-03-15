@@ -215,7 +215,7 @@ inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
 
 outputs = model.generate(
     **inputs,
-    max_length=40,
+    max_length=model.config.n_positions,  # Ensure max_length does not exceed model's n_positions
     num_return_sequences=3,
     do_sample=True,
     top_k=50,
