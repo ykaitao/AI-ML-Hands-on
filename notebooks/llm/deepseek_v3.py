@@ -17,31 +17,32 @@
 # !pip install -q transformers datasets accelerate --upgrade
 
 # %% Imports
-import os
-from pathlib import Path
-
 import torch
-from datasets import load_dataset
-from tokenizers import ByteLevelBPETokenizer
 from transformers import (
     DeepseekV3Config,
     DeepseekV3ForCausalLM,
-    GPT2TokenizerFast,
     Trainer,
     TrainingArguments,
 )
 
+from workshop_common import (
+    build_workshop_paths,
+    count_unique_words,
+    detect_device_and_optimizer,
+    load_or_train_byte_level_bpe_tokenizer,
+    load_text_dataset_with_validation,
+    tokenize_and_group_texts,
+    verify_causal_lm_dataset,
+)
+
 # %% Load dataset
-script_dir = Path(__file__).parent
-data_file = (script_dir / "data_examples/the-verdict.txt").__str__()
-tokenizer_dir = (script_dir / "tokenizers/verdict_tokenizer").__str__()
-output_dir = (script_dir / "models/deepseek-r1-debug").__str__()
+paths = build_workshop_paths(
+    __file__,
+    tokenizer_subdir="tokenizers/verdict_tokenizer",
+    output_subdir="models/deepseek-r1-debug",
+)
 
-dataset = load_dataset("text", data_files=data_file)
-
-if "validation" not in dataset:
-    dataset = dataset["train"].train_test_split(test_size=0.1, seed=42)
-    dataset["validation"] = dataset.pop("test")
+dataset = load_text_dataset_with_validation(paths.data_file)
 
 print("Dataset loaded.")
 print(dataset)
@@ -51,49 +52,17 @@ print("\nSample text:")
 print(dataset["train"][0]["text"][:500])
 
 
-def count_unique_words(split):
-    return len(set(word for ex in split for word in ex["text"].split()))
-
-
 print("Unique words in training set:", count_unique_words(dataset["train"]))
 
 # %% Device & optimizer detection
-device_type, optim_type = (
-    ("tpu", "adamw_torch")
-    if "COLAB_TPU_ADDR" in os.environ
-    else (
-        ("mps", "adamw_torch")
-        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
-        else (
-            ("gpu", "adamw_torch_fused")
-            if torch.cuda.is_available()
-            else ("cpu", "adamw_torch")
-        )
-    )
-)
+device_type, optim_type = detect_device_and_optimizer()
 print(f"Device: {device_type}, Optimizer: {optim_type}")
 
 # %% Tokenizer: Train or load
-if not os.path.exists(tokenizer_dir):
-    print("Training new tokenizer...")
-    tokenizer = ByteLevelBPETokenizer()
-    tokenizer.train(
-        files=data_file,
-        vocab_size=1500,
-        min_frequency=2,
-        special_tokens=["<s>", "<pad>", "</s>", "<unk>", "<mask>"],
-    )
-    os.makedirs(tokenizer_dir, exist_ok=True)
-    tokenizer.save_model(tokenizer_dir)
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
-else:
-    print("Loading existing tokenizer...")
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
-
-tokenizer.pad_token = "<pad>"
-tokenizer.eos_token = "</s>"
-tokenizer.bos_token = "<s>"
-tokenizer.unk_token = "<unk>"
+tokenizer = load_or_train_byte_level_bpe_tokenizer(
+    data_file=paths.data_file,
+    tokenizer_dir=paths.tokenizer_dir,
+)
 
 print(f"\nTokenizer ready. Vocab size: {len(tokenizer)}")
 sample = tokenizer.encode("I love large language models")
@@ -144,38 +113,15 @@ with torch.no_grad():
 print("Forward-pass logits shape:", tuple(debug_logits.shape))
 
 # %% Tokenize & group text into blocks
-tokenized = dataset.map(
-    lambda x: tokenizer(x["text"]),
-    batched=True,
-    remove_columns=["text"],
-)
-tokenized = tokenized.filter(lambda x: len(x["input_ids"]) > 0)
-
 block_size = 16
-
-
-def group_texts(examples):
-    concat = {k: sum(examples[k], []) for k in examples}
-    total_len = (len(concat["input_ids"]) // block_size) * block_size
-    result = {
-        k: [t[i : i + block_size] for i in range(0, total_len, block_size)]
-        for k, t in concat.items()
-    }
-    result["labels"] = result["input_ids"].copy()
-    return result
-
-
-lm_datasets = tokenized.map(group_texts, batched=True, batch_size=32)
-
-for split in lm_datasets:
-    for col in ["input_ids", "attention_mask", "labels"]:
-        assert col in lm_datasets[split].features
+lm_datasets = tokenize_and_group_texts(dataset, tokenizer, block_size=block_size)
+verify_causal_lm_dataset(lm_datasets)
 print("\nDataset ready for training!")
 
 # %% Training
 # Keep this short so it is practical for interactive debugging.
 training_args = TrainingArguments(
-    output_dir=output_dir,
+    output_dir=paths.output_dir,
     eval_strategy="no",
     learning_rate=5e-4,
     per_device_train_batch_size=2,
@@ -200,30 +146,24 @@ trainer = Trainer(
 )
 
 print("\nStarting training...")
-"""Stepwise Debugging:
-1. Open the file: .venv/lib/python3.11/site-packages/transformers/models/deepseek_v3/modeling_deepseek_v3.py
-2. Set breakpoints at:
-   - DeepseekV3Model.forward()
-   - DeepseekV3DecoderLayer.forward()
-   - DeepseekV3Attention.forward()
-   - DeepseekV3MoE.forward()
-3. Start this script in the debugger and step into the forward pass.
-"""
+# Stepwise debugging:
+# 1. Open .venv/lib/python3.11/site-packages/transformers/models/deepseek_v3/modeling_deepseek_v3.py
+# 2. Set breakpoints at DeepseekV3Model.forward(), DeepseekV3DecoderLayer.forward(),
+#    DeepseekV3Attention.forward(), and DeepseekV3MoE.forward()
+# 3. Start this script in the debugger and step into the forward pass
 
-"""Loss verification sketch:
-`nn.functional.cross_entropy(source, target, ignore_index=ignore_index, reduction=reduction)`
-
-import numpy as np
-
-t = target.cpu().numpy()
-s = source.cpu().detach().numpy()
-tt = t[t != ignore_index]
-ss = s[t != ignore_index]
-ss_e = np.exp(ss)
-ss_e_sum = ss_e.sum(axis=1, keepdims=True)
-p = ss_e / ss_e_sum
-sum([-np.log(p[i][j]) for i, j in enumerate(tt)])
-"""
+# Loss verification sketch:
+# nn.functional.cross_entropy(source, target, ignore_index=ignore_index, reduction=reduction)
+# import numpy as np
+#
+# t = target.cpu().numpy()
+# s = source.cpu().detach().numpy()
+# tt = t[t != ignore_index]
+# ss = s[t != ignore_index]
+# ss_e = np.exp(ss)
+# ss_e_sum = ss_e.sum(axis=1, keepdims=True)
+# p = ss_e / ss_e_sum
+# sum([-np.log(p[i][j]) for i, j in enumerate(tt)])
 
 trainer.train()
 

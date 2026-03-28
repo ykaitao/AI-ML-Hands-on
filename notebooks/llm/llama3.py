@@ -14,34 +14,27 @@
 # !pip install -q transformers datasets accelerate sentencepiece --upgrade
 
 # %% Imports
-import os
-from pathlib import Path
-
 import torch
-from transformers import (
-    LlamaConfig,
-    LlamaForCausalLM,
-    LlamaTokenizer,
-    Trainer,
-    TrainingArguments,
+from transformers import LlamaConfig, LlamaForCausalLM, Trainer, TrainingArguments
+
+from workshop_common import (
+    build_workshop_paths,
+    count_unique_words,
+    detect_device_and_optimizer,
+    load_or_train_sentencepiece_tokenizer,
+    load_text_dataset_with_validation,
+    tokenize_and_group_texts,
+    verify_causal_lm_dataset,
 )
-import sentencepiece as spm
-from datasets import load_dataset
-import matplotlib.pyplot as plt
 
 # %% Load dataset
-# Get the directory where this script is located
-script_dir = Path(__file__).parent
-data_file = (script_dir / "data_examples/the-verdict.txt").__str__()
-tokenizer_dir = (script_dir / "tokenizers/verdict_llama_tokenizer").__str__()
-output_dir = (script_dir / "models/llama3-small-verdict").__str__()
+paths = build_workshop_paths(
+    __file__,
+    tokenizer_subdir="tokenizers/verdict_llama_tokenizer",
+    output_subdir="models/llama3-small-verdict",
+)
 
-dataset = load_dataset("text", data_files=data_file)
-
-# Split train/validation if validation not already in dataset
-if "validation" not in dataset:
-    dataset = dataset["train"].train_test_split(test_size=0.1, seed=42)
-    dataset["validation"] = dataset.pop("test")
+dataset = load_text_dataset_with_validation(paths.data_file)
 print("Dataset loaded.")
 print(dataset)
 
@@ -50,54 +43,19 @@ print("\nSample text:")
 print(dataset["train"][0]["text"][:500])
 
 
-# Count unique words
-def count_unique_words(split):
-    return len(set(word for ex in split for word in ex["text"].split()))
-
-
 print("Unique words in training set:", count_unique_words(dataset["train"]))
 
 # %% Device & optimizer detection
-device_type, optim_type = (
-    ("tpu", "adamw_torch")
-    if "COLAB_TPU_ADDR" in os.environ
-    else (
-        ("mps", "adamw_torch")
-        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
-        else (
-            ("gpu", "adamw_torch_fused")
-            if torch.cuda.is_available()
-            else ("cpu", "adamw_torch")
-        )
-    )
-)
+device_type, optim_type = detect_device_and_optimizer()
 print(f"Device: {device_type}, Optimizer: {optim_type}")
 
 # %% Tokenizer: Train or load
 
-spm_model_path = os.path.join(tokenizer_dir, "llama.model")
-
-if not os.path.exists(spm_model_path):
-    print("Training new SentencePiece tokenizer...")
-    os.makedirs(tokenizer_dir, exist_ok=True)
-    spm.SentencePieceTrainer.Train(
-        input=data_file,
-        model_prefix=os.path.join(tokenizer_dir, "llama"),
-        vocab_size=1187,
-        character_coverage=1.0,
-        model_type="unigram",
-        user_defined_symbols=["<s>", "</s>", "<pad>", "<mask>"]
-    )
-
-# Load LLaMA tokenizer
-print("Loading tokenizer...")
-tokenizer = LlamaTokenizer(vocab_file=spm_model_path)
-
-# Ensure special tokens are set
-tokenizer.pad_token = "<pad>"
-tokenizer.eos_token = "</s>"
-tokenizer.bos_token = "<s>"
-tokenizer.unk_token = "<unk>"
+tokenizer = load_or_train_sentencepiece_tokenizer(
+    data_file=paths.data_file,
+    tokenizer_dir=paths.tokenizer_dir,
+    vocab_size=1187,
+)
 
 print(f"\nTokenizer ready. Vocab size: {len(tokenizer)}")
 sample = tokenizer.encode("I love large language models")
@@ -105,35 +63,9 @@ print("Encoded:", sample)
 print("Decoded:", tokenizer.decode(sample))
 
 # %% Tokenize & group text into blocks
-tokenized = dataset.map(
-    lambda x: tokenizer(x["text"]),
-    batched=True,
-    remove_columns=["text"],
-)
-tokenized = tokenized.filter(lambda x: len(x["input_ids"]) > 0)
-
-# Chunk sequences into fixed-length blocks
 block_size = 32
-
-
-def group_texts(examples):
-    concat = {k: sum(examples[k], []) for k in examples}
-    total_len = (len(concat["input_ids"]) // block_size) * block_size
-    result = {
-        k: [t[i : i + block_size] for i in range(0, total_len, block_size)]
-        for k, t in concat.items()
-    }
-    # For causal LM, labels are the same as input_ids
-    result["labels"] = result["input_ids"].copy()
-    return result
-
-
-lm_datasets = tokenized.map(group_texts, batched=True, batch_size=32)
-
-# Verify dataset structure
-for split in lm_datasets:
-    for col in ["input_ids", "attention_mask", "labels"]:
-        assert col in lm_datasets[split].features
+lm_datasets = tokenize_and_group_texts(dataset, tokenizer, block_size=block_size)
+verify_causal_lm_dataset(lm_datasets)
 print("\nDataset ready for training!")
 
 
@@ -154,7 +86,7 @@ print(model)
 
 # %% Training
 training_args = TrainingArguments(
-    output_dir=output_dir,
+    output_dir=paths.output_dir,
     eval_strategy="epoch",
     learning_rate=2e-5,
     per_device_train_batch_size=8,
@@ -189,11 +121,13 @@ inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
 
 outputs = model.generate(
     **inputs,
-    max_length=40,
+    max_length=model.config.max_position_embeddings,
     num_return_sequences=3,
     do_sample=True,
     top_k=50,
     top_p=0.95,
+    pad_token_id=tokenizer.pad_token_id,
+    eos_token_id=tokenizer.eos_token_id,
 )
 
 print("\nGenerated Texts:")
