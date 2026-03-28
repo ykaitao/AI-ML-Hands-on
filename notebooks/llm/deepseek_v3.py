@@ -21,18 +21,21 @@ import torch
 from transformers import (
     DeepseekV3Config,
     DeepseekV3ForCausalLM,
-    Trainer,
-    TrainingArguments,
 )
 
 from workshop_common import (
     build_workshop_paths,
-    count_unique_words,
+    build_trainer,
+    build_training_args,
     detect_device_and_optimizer,
+    generate_and_print_samples,
     load_or_train_byte_level_bpe_tokenizer,
     load_text_dataset_with_validation,
-    tokenize_and_group_texts,
-    verify_causal_lm_dataset,
+    prepare_causal_lm_datasets,
+    print_dataset_overview,
+    print_runtime_info,
+    print_tokenizer_preview,
+    train_and_report,
 )
 
 # %% Load dataset
@@ -43,20 +46,11 @@ paths = build_workshop_paths(
 )
 
 dataset = load_text_dataset_with_validation(paths.data_file)
-
-print("Dataset loaded.")
-print(dataset)
-
-# %% Explore dataset (optional)
-print("\nSample text:")
-print(dataset["train"][0]["text"][:500])
-
-
-print("Unique words in training set:", count_unique_words(dataset["train"]))
+print_dataset_overview(dataset)
 
 # %% Device & optimizer detection
 device_type, optim_type = detect_device_and_optimizer()
-print(f"Device: {device_type}, Optimizer: {optim_type}")
+print_runtime_info(device_type, optim_type)
 
 # %% Tokenizer: Train or load
 tokenizer = load_or_train_byte_level_bpe_tokenizer(
@@ -64,10 +58,7 @@ tokenizer = load_or_train_byte_level_bpe_tokenizer(
     tokenizer_dir=paths.tokenizer_dir,
 )
 
-print(f"\nTokenizer ready. Vocab size: {len(tokenizer)}")
-sample = tokenizer.encode("I love large language models")
-print("Encoded:", sample)
-print("Decoded:", tokenizer.decode(sample))
+print_tokenizer_preview(tokenizer, sample_text="I love large language models")
 
 # %% Model setup (tiny DeepSeek-style model)
 # Keep one dense layer and one MoE layer so the debugger can step through both.
@@ -96,6 +87,7 @@ config = DeepseekV3Config(
     bos_token_id=tokenizer.bos_token_id,
     eos_token_id=tokenizer.eos_token_id,
 )
+setattr(config, "_attn_implementation", "eager")
 model = DeepseekV3ForCausalLM(config)
 print("\nModel initialized.")
 print(model)
@@ -114,14 +106,13 @@ print("Forward-pass logits shape:", tuple(debug_logits.shape))
 
 # %% Tokenize & group text into blocks
 block_size = 16
-lm_datasets = tokenize_and_group_texts(dataset, tokenizer, block_size=block_size)
-verify_causal_lm_dataset(lm_datasets)
-print("\nDataset ready for training!")
+lm_datasets = prepare_causal_lm_datasets(dataset, tokenizer, block_size=block_size)
 
 # %% Training
 # Keep this short so it is practical for interactive debugging.
-training_args = TrainingArguments(
-    output_dir=paths.output_dir,
+training_args = build_training_args(
+    paths.output_dir,
+    optim_type,
     eval_strategy="no",
     learning_rate=5e-4,
     per_device_train_batch_size=2,
@@ -130,65 +121,31 @@ training_args = TrainingArguments(
     num_train_epochs=1,
     max_steps=3,
     weight_decay=0.01,
-    optim=optim_type,
-    report_to="none",
-    dataloader_num_workers=0,
-    fp16=False,
     save_strategy="no",
     logging_steps=1,
 )
 
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=lm_datasets["train"],
-    eval_dataset=lm_datasets["validation"],
-)
+trainer = build_trainer(model, training_args, lm_datasets)
 
-print("\nStarting training...")
 # Stepwise debugging:
 # 1. Open .venv/lib/python3.11/site-packages/transformers/models/deepseek_v3/modeling_deepseek_v3.py
 # 2. Set breakpoints at DeepseekV3Model.forward(), DeepseekV3DecoderLayer.forward(),
 #    DeepseekV3Attention.forward(), and DeepseekV3MoE.forward()
 # 3. Start this script in the debugger and step into the forward pass
 
-# Loss verification sketch:
-# nn.functional.cross_entropy(source, target, ignore_index=ignore_index, reduction=reduction)
-# import numpy as np
-#
-# t = target.cpu().numpy()
-# s = source.cpu().detach().numpy()
-# tt = t[t != ignore_index]
-# ss = s[t != ignore_index]
-# ss_e = np.exp(ss)
-# ss_e_sum = ss_e.sum(axis=1, keepdims=True)
-# p = ss_e / ss_e_sum
-# sum([-np.log(p[i][j]) for i, j in enumerate(tt)])
-
-trainer.train()
-
-results = trainer.evaluate()
-perplexity = torch.exp(torch.tensor(results["eval_loss"]))
-print(f"\nEvaluation Perplexity: {perplexity.item():.2f}")
+results, perplexity = train_and_report(trainer)
 
 # %% Text generation
-input_text = "He laughed slightly"
-inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
-
-outputs = model.generate(
-    **inputs,
-    max_length=32,
+generate_and_print_samples(
+    model,
+    tokenizer,
+    input_text="He laughed slightly",
+    max_length=model.config.max_position_embeddings,
     num_return_sequences=3,
     do_sample=True,
     top_k=20,
     top_p=0.9,
-    pad_token_id=tokenizer.pad_token_id,
-    eos_token_id=tokenizer.eos_token_id,
 )
-
-print("\nGenerated Texts:")
-for output in outputs:
-    print(tokenizer.decode(output, skip_special_tokens=True))
 
 # %% Optional exercises for students
 # 1. Increase `n_routed_experts` and inspect router behavior

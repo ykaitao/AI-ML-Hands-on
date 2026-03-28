@@ -7,7 +7,7 @@ import os
 import torch
 from datasets import load_dataset
 from tokenizers import ByteLevelBPETokenizer
-from transformers import GPT2TokenizerFast, LlamaTokenizer
+from transformers import GPT2TokenizerFast, LlamaTokenizer, Trainer, TrainingArguments
 
 
 SPECIAL_TOKENS = {
@@ -56,6 +56,14 @@ def count_unique_words(split):
     return len(set(word for example in split for word in example["text"].split()))
 
 
+def print_dataset_overview(dataset, preview_chars=500):
+    print("Dataset loaded.")
+    print(dataset)
+    print("\nSample text:")
+    print(dataset["train"][0]["text"][:preview_chars])
+    print("Unique words in training set:", count_unique_words(dataset["train"]))
+
+
 def detect_device_and_optimizer():
     return (
         ("tpu", "adamw_torch")
@@ -71,6 +79,10 @@ def detect_device_and_optimizer():
             )
         )
     )
+
+
+def print_runtime_info(device_type, optim_type):
+    print(f"Device: {device_type}, Optimizer: {optim_type}")
 
 
 def apply_standard_special_tokens(tokenizer: TokenizerType) -> TokenizerType:
@@ -158,3 +170,86 @@ def verify_causal_lm_dataset(lm_datasets):
     for split in lm_datasets:
         for column in ["input_ids", "attention_mask", "labels"]:
             assert column in lm_datasets[split].features
+
+
+def prepare_causal_lm_datasets(dataset, tokenizer, block_size, map_batch_size=32):
+    lm_datasets = tokenize_and_group_texts(
+        dataset,
+        tokenizer,
+        block_size=block_size,
+        map_batch_size=map_batch_size,
+    )
+    verify_causal_lm_dataset(lm_datasets)
+    print("\nDataset ready for training!")
+    return lm_datasets
+
+
+def print_tokenizer_preview(tokenizer, sample_text, extra_decode_examples=None):
+    print(f"\nTokenizer ready. Vocab size: {len(tokenizer)}")
+    sample_ids = tokenizer.encode(sample_text)
+    print("Encoded:", sample_ids)
+    print("Decoded:", tokenizer.decode(sample_ids))
+
+    if extra_decode_examples:
+        for label, token_ids in extra_decode_examples:
+            print(label, tokenizer.decode(token_ids))
+
+
+def build_training_args(output_dir, optim_type, **overrides):
+    training_kwargs = {
+        "output_dir": output_dir,
+        "optim": optim_type,
+        "report_to": "none",
+        "dataloader_num_workers": 0,
+        "fp16": False,
+    }
+    training_kwargs.update(overrides)
+    return TrainingArguments(**training_kwargs)
+
+
+def build_trainer(model, training_args, lm_datasets):
+    return Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=lm_datasets["train"],
+        eval_dataset=lm_datasets["validation"],
+    )
+
+
+def train_and_report(trainer):
+    print("\nStarting training...")
+    trainer.train()
+    results = trainer.evaluate()
+    perplexity = torch.exp(torch.tensor(results["eval_loss"]))
+    print(f"\nEvaluation Perplexity: {perplexity.item():.2f}")
+    return results, perplexity
+
+
+def generate_and_print_samples(
+    model,
+    tokenizer,
+    input_text,
+    max_length,
+    num_return_sequences=3,
+    do_sample=True,
+    top_k=50,
+    top_p=0.95,
+    **overrides,
+):
+    inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+    generation_kwargs = {
+        "max_length": max_length,
+        "num_return_sequences": num_return_sequences,
+        "do_sample": do_sample,
+        "top_k": top_k,
+        "top_p": top_p,
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+    }
+    generation_kwargs.update(overrides)
+
+    outputs = model.generate(**inputs, **generation_kwargs)
+    print("\nGenerated Texts:")
+    for output in outputs:
+        print(tokenizer.decode(output, skip_special_tokens=True))
+    return outputs
