@@ -1,8 +1,8 @@
+import os
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
-
-import os
+from typing import Any, Final, TypeVar
 
 import torch
 from datasets import load_dataset
@@ -10,19 +10,45 @@ from tokenizers import ByteLevelBPETokenizer
 from transformers import GPT2TokenizerFast, LlamaTokenizer, Trainer, TrainingArguments
 
 
-SPECIAL_TOKENS = {
+DEFAULT_DATA_SUBPATH: Final[str] = "data_examples/the-verdict.txt"
+DEFAULT_DATASET_TEST_SIZE: Final[float] = 0.1
+DEFAULT_DATASET_SEED: Final[int] = 42
+DEFAULT_TOKENIZER_PREVIEW_CHARS: Final[int] = 500
+DEFAULT_TOKENIZER_PREVIEW_TEXT: Final[str] = "I love large language models"
+DEFAULT_MAP_BATCH_SIZE: Final[int] = 32
+DEFAULT_NUM_RETURN_SEQUENCES: Final[int] = 3
+DEFAULT_TOP_K: Final[int] = 50
+DEFAULT_TOP_P: Final[float] = 0.95
+
+SPECIAL_TOKENS: Final[dict[str, str]] = {
     "bos_token": "<s>",
     "pad_token": "<pad>",
     "eos_token": "</s>",
     "unk_token": "<unk>",
 }
 
-BYTE_LEVEL_SPECIAL_TOKENS = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"]
+BYTE_LEVEL_SPECIAL_TOKENS: Final[list[str]] = [
+    "<s>",
+    "<pad>",
+    "</s>",
+    "<unk>",
+    "<mask>",
+]
+TRAINING_ARG_DEFAULTS: Final[dict[str, Any]] = {
+    "report_to": "none",
+    "dataloader_num_workers": 0,
+    "fp16": False,
+}
+
 TokenizerType = TypeVar("TokenizerType")
+ExampleBatch = dict[str, list[list[int]]]
+DecodedExample = tuple[str, Sequence[int]]
 
 
 @dataclass(frozen=True)
 class WorkshopPaths:
+    """Resolved paths shared by the workshop scripts."""
+
     script_dir: str
     data_file: str
     tokenizer_dir: str
@@ -30,11 +56,13 @@ class WorkshopPaths:
 
 
 def build_workshop_paths(
-    script_file,
-    tokenizer_subdir,
-    output_subdir,
-    data_subpath="data_examples/the-verdict.txt",
-):
+    script_file: str,
+    tokenizer_subdir: str,
+    output_subdir: str,
+    data_subpath: str = DEFAULT_DATA_SUBPATH,
+) -> WorkshopPaths:
+    """Build the file-system paths used by a workshop script."""
+
     script_dir = Path(script_file).resolve().parent
     return WorkshopPaths(
         script_dir=str(script_dir),
@@ -44,7 +72,13 @@ def build_workshop_paths(
     )
 
 
-def load_text_dataset_with_validation(data_file, test_size=0.1, seed=42):
+def load_text_dataset_with_validation(
+    data_file: str,
+    test_size: float = DEFAULT_DATASET_TEST_SIZE,
+    seed: int = DEFAULT_DATASET_SEED,
+):
+    """Load a text dataset and create a validation split when absent."""
+
     dataset = load_dataset("text", data_files=data_file)
     if "validation" not in dataset:
         dataset = dataset["train"].train_test_split(test_size=test_size, seed=seed)
@@ -52,11 +86,17 @@ def load_text_dataset_with_validation(data_file, test_size=0.1, seed=42):
     return dataset
 
 
-def count_unique_words(split):
+def count_unique_words(split: Iterable[dict[str, str]]) -> int:
+    """Count unique whitespace-delimited words in a dataset split."""
+
     return len(set(word for example in split for word in example["text"].split()))
 
 
-def print_dataset_overview(dataset, preview_chars=500):
+def print_dataset_overview(
+    dataset: Any, preview_chars: int = DEFAULT_TOKENIZER_PREVIEW_CHARS
+) -> None:
+    """Print a compact overview of the loaded dataset."""
+
     print("Dataset loaded.")
     print(dataset)
     print("\nSample text:")
@@ -64,28 +104,25 @@ def print_dataset_overview(dataset, preview_chars=500):
     print("Unique words in training set:", count_unique_words(dataset["train"]))
 
 
-def detect_device_and_optimizer():
-    return (
-        ("tpu", "adamw_torch")
-        if "COLAB_TPU_ADDR" in os.environ
-        else (
-            ("mps", "adamw_torch")
-            if getattr(torch.backends, "mps", None)
-            and torch.backends.mps.is_available()
-            else (
-                ("gpu", "adamw_torch_fused")
-                if torch.cuda.is_available()
-                else ("cpu", "adamw_torch")
-            )
-        )
-    )
+def detect_device_and_optimizer() -> tuple[str, str]:
+    """Choose a simple device label and optimizer name for the current runtime."""
 
+    if "COLAB_TPU_ADDR" in os.environ:
+        return "tpu", "adamw_torch"
 
-def print_runtime_info(device_type, optim_type):
-    print(f"Device: {device_type}, Optimizer: {optim_type}")
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend and torch.backends.mps.is_available():
+        return "mps", "adamw_torch"
+
+    if torch.cuda.is_available():
+        return "gpu", "adamw_torch_fused"
+
+    return "cpu", "adamw_torch"
 
 
 def apply_standard_special_tokens(tokenizer: TokenizerType) -> TokenizerType:
+    """Apply the same special-token configuration across tokenizer types."""
+
     tokenizer.pad_token = SPECIAL_TOKENS["pad_token"]
     tokenizer.eos_token = SPECIAL_TOKENS["eos_token"]
     tokenizer.bos_token = SPECIAL_TOKENS["bos_token"]
@@ -94,12 +131,15 @@ def apply_standard_special_tokens(tokenizer: TokenizerType) -> TokenizerType:
 
 
 def load_or_train_byte_level_bpe_tokenizer(
-    data_file,
-    tokenizer_dir,
-    vocab_size=1500,
-    min_frequency=2,
+    data_file: str,
+    tokenizer_dir: str,
+    vocab_size: int = 1500,
+    min_frequency: int = 2,
 ) -> GPT2TokenizerFast:
-    if not os.path.exists(tokenizer_dir):
+    """Load an existing byte-level BPE tokenizer or train it on demand."""
+
+    tokenizer_path = Path(tokenizer_dir)
+    if not tokenizer_path.exists():
         print("Training new tokenizer...")
         tokenizer = ByteLevelBPETokenizer()
         tokenizer.train(
@@ -108,29 +148,32 @@ def load_or_train_byte_level_bpe_tokenizer(
             min_frequency=min_frequency,
             special_tokens=BYTE_LEVEL_SPECIAL_TOKENS,
         )
-        os.makedirs(tokenizer_dir, exist_ok=True)
-        tokenizer.save_model(tokenizer_dir)
+        tokenizer_path.mkdir(parents=True, exist_ok=True)
+        tokenizer.save_model(str(tokenizer_path))
 
-    tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_dir)
+    tokenizer = GPT2TokenizerFast.from_pretrained(str(tokenizer_path))
     return apply_standard_special_tokens(tokenizer)
 
 
 def load_or_train_sentencepiece_tokenizer(
-    data_file,
-    tokenizer_dir,
-    vocab_size,
-    model_prefix="llama",
+    data_file: str,
+    tokenizer_dir: str,
+    vocab_size: int,
+    model_prefix: str = "llama",
 ) -> LlamaTokenizer:
+    """Load an existing SentencePiece tokenizer or train it on demand."""
+
     import sentencepiece as spm
 
-    spm_model_path = os.path.join(tokenizer_dir, f"{model_prefix}.model")
+    tokenizer_path = Path(tokenizer_dir)
+    spm_model_path = tokenizer_path / f"{model_prefix}.model"
 
-    if not os.path.exists(spm_model_path):
+    if not spm_model_path.exists():
         print("Training new SentencePiece tokenizer...")
-        os.makedirs(tokenizer_dir, exist_ok=True)
+        tokenizer_path.mkdir(parents=True, exist_ok=True)
         spm.SentencePieceTrainer.Train(
             input=data_file,
-            model_prefix=os.path.join(tokenizer_dir, model_prefix),
+            model_prefix=str(tokenizer_path / model_prefix),
             vocab_size=vocab_size,
             character_coverage=1.0,
             model_type="unigram",
@@ -138,41 +181,65 @@ def load_or_train_sentencepiece_tokenizer(
         )
 
     print("Loading tokenizer...")
-    tokenizer = LlamaTokenizer(vocab_file=spm_model_path)
+    tokenizer = LlamaTokenizer(vocab_file=str(spm_model_path))
     return apply_standard_special_tokens(tokenizer)
 
 
-def tokenize_and_group_texts(dataset, tokenizer, block_size, map_batch_size=32):
-    tokenized = dataset.map(
-        lambda example: tokenizer(example["text"]),
+def _group_texts_into_blocks(examples: ExampleBatch, block_size: int) -> ExampleBatch:
+    concatenated = {key: sum(examples[key], []) for key in examples}
+    total_length = (len(concatenated["input_ids"]) // block_size) * block_size
+
+    grouped_examples = {
+        key: [
+            tokens[index : index + block_size]
+            for index in range(0, total_length, block_size)
+        ]
+        for key, tokens in concatenated.items()
+    }
+    grouped_examples["labels"] = grouped_examples["input_ids"].copy()
+    return grouped_examples
+
+
+def tokenize_and_group_texts(
+    dataset: Any,
+    tokenizer: Any,
+    block_size: int,
+    map_batch_size: int = DEFAULT_MAP_BATCH_SIZE,
+):
+    """Tokenize text examples and group them into fixed-length causal-LM blocks."""
+
+    tokenized_dataset = dataset.map(
+        lambda examples: tokenizer(examples["text"]),
         batched=True,
         remove_columns=["text"],
     )
-    tokenized = tokenized.filter(lambda example: len(example["input_ids"]) > 0)
+    tokenized_dataset = tokenized_dataset.filter(
+        lambda example: len(example["input_ids"]) > 0
+    )
 
-    def group_texts(examples):
-        concatenated = {key: sum(examples[key], []) for key in examples}
-        total_length = (len(concatenated["input_ids"]) // block_size) * block_size
-        result = {
-            key: [
-                tokens[index : index + block_size]
-                for index in range(0, total_length, block_size)
-            ]
-            for key, tokens in concatenated.items()
-        }
-        result["labels"] = result["input_ids"].copy()
-        return result
-
-    return tokenized.map(group_texts, batched=True, batch_size=map_batch_size)
+    return tokenized_dataset.map(
+        lambda examples: _group_texts_into_blocks(examples, block_size),
+        batched=True,
+        batch_size=map_batch_size,
+    )
 
 
-def verify_causal_lm_dataset(lm_datasets):
+def verify_causal_lm_dataset(lm_datasets: Any) -> None:
+    """Assert that the causal-LM dataset contains the expected columns."""
+
     for split in lm_datasets:
         for column in ["input_ids", "attention_mask", "labels"]:
             assert column in lm_datasets[split].features
 
 
-def prepare_causal_lm_datasets(dataset, tokenizer, block_size, map_batch_size=32):
+def prepare_causal_lm_datasets(
+    dataset: Any,
+    tokenizer: Any,
+    block_size: int,
+    map_batch_size: int = DEFAULT_MAP_BATCH_SIZE,
+):
+    """Create and validate tokenized causal-LM datasets."""
+
     lm_datasets = tokenize_and_group_texts(
         dataset,
         tokenizer,
@@ -184,39 +251,40 @@ def prepare_causal_lm_datasets(dataset, tokenizer, block_size, map_batch_size=32
     return lm_datasets
 
 
-def print_tokenizer_preview(tokenizer, sample_text, extra_decode_examples=None):
+def print_tokenizer_preview(
+    tokenizer: Any,
+    sample_text: str = DEFAULT_TOKENIZER_PREVIEW_TEXT,
+    extra_decode_examples: Sequence[DecodedExample] | None = None,
+) -> None:
+    """Print a compact tokenizer smoke test for workshop notebooks."""
+
     print(f"\nTokenizer ready. Vocab size: {len(tokenizer)}")
     sample_ids = tokenizer.encode(sample_text)
     print("Encoded:", sample_ids)
     print("Decoded:", tokenizer.decode(sample_ids))
 
-    if extra_decode_examples:
+    if extra_decode_examples is not None:
         for label, token_ids in extra_decode_examples:
             print(label, tokenizer.decode(token_ids))
 
 
-def build_training_args(output_dir, optim_type, **overrides):
+def build_training_args(
+    output_dir: str, optim_type: str, **overrides: Any
+) -> TrainingArguments:
+    """Build TrainingArguments with shared defaults for the workshop scripts."""
+
     training_kwargs = {
         "output_dir": output_dir,
         "optim": optim_type,
-        "report_to": "none",
-        "dataloader_num_workers": 0,
-        "fp16": False,
+        **TRAINING_ARG_DEFAULTS,
     }
     training_kwargs.update(overrides)
     return TrainingArguments(**training_kwargs)
 
 
-def build_trainer(model, training_args, lm_datasets):
-    return Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=lm_datasets["train"],
-        eval_dataset=lm_datasets["validation"],
-    )
+def train_and_report(trainer: Trainer) -> tuple[dict[str, Any], torch.Tensor]:
+    """Run training, evaluate, and report perplexity."""
 
-
-def train_and_report(trainer):
     print("\nStarting training...")
     trainer.train()
     results = trainer.evaluate()
@@ -226,16 +294,18 @@ def train_and_report(trainer):
 
 
 def generate_and_print_samples(
-    model,
-    tokenizer,
-    input_text,
-    max_length,
-    num_return_sequences=3,
-    do_sample=True,
-    top_k=50,
-    top_p=0.95,
-    **overrides,
+    model: Any,
+    tokenizer: Any,
+    input_text: str,
+    max_length: int,
+    num_return_sequences: int = DEFAULT_NUM_RETURN_SEQUENCES,
+    do_sample: bool = True,
+    top_k: int = DEFAULT_TOP_K,
+    top_p: float = DEFAULT_TOP_P,
+    **overrides: Any,
 ):
+    """Generate and print decoded samples from a causal language model."""
+
     inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
     generation_kwargs = {
         "max_length": max_length,

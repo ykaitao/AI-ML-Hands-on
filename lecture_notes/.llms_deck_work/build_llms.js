@@ -5,6 +5,7 @@ const {
   svgToDataUri,
   latexToSvgDataUri,
   codeToRuns,
+  imageSizingContain,
   safeOuterShadow,
   warnIfSlideHasOverlaps,
   warnIfSlideElementsOutOfBounds,
@@ -47,6 +48,20 @@ const COLORS = {
   codeBg: '0F172A',
   codeLine: '334155',
   border: 'CBD5E1',
+  canvas: 'F8FAFC',
+  softBlue: 'DBEAFE',
+  softCyan: 'ECFEFF',
+  softPurple: 'F5F3FF',
+  softGreen: 'ECFDF5',
+  softAmber: 'FFF7ED',
+};
+
+const SECTION_STYLES = {
+  position: { label: 'Position & order', accent: COLORS.blue, soft: COLORS.softBlue, soft2: 'EFF6FF' },
+  norm: { label: 'Normalization & score shaping', accent: COLORS.cyan, soft: COLORS.softCyan, soft2: 'F0FDFF' },
+  attention: { label: 'Attention & inference', accent: COLORS.purple, soft: COLORS.softPurple, soft2: 'FAF5FF' },
+  sparse: { label: 'Sparse capacity', accent: COLORS.green, soft: COLORS.softGreen, soft2: 'F0FDF4' },
+  activation: { label: 'Activations & gated MLPs', accent: COLORS.amber, soft: COLORS.softAmber, soft2: 'FFFBEB' },
 };
 
 const slideW = 13.333;
@@ -78,11 +93,22 @@ function addCard(slide, x, y, w, h, opts = {}) {
     line: { color: opts.line || COLORS.border, width: opts.lineWidth || 1 },
     shadow: safeOuterShadow('94A3B8', 0.14, 45, 2, 1),
   });
+  if (opts.accent) {
+    slide.addShape(pptx.ShapeType.roundRect, {
+      x: x + 0.08,
+      y: y + 0.12,
+      w: 0.08,
+      h: h - 0.24,
+      rectRadius: 0.04,
+      fill: { color: opts.accent },
+      line: { color: opts.accent, width: 1 },
+    });
+  }
   if (opts.title) {
     slide.addText(opts.title, {
-      x: x + 0.18,
+      x: x + (opts.accent ? 0.26 : 0.18),
       y: y + 0.08,
-      w: w - 0.36,
+      w: w - (opts.accent ? 0.42 : 0.36),
       h: 0.22,
       fontFace: 'Arial',
       fontSize: opts.titleSize || 12,
@@ -120,6 +146,125 @@ function drawBulletList(slide, items, x, y, w, h, opts = {}) {
   });
 }
 
+function addSectionBadge(slide, label, x, y, w, style) {
+  slide.addShape(pptx.ShapeType.roundRect, {
+    x,
+    y,
+    w,
+    h: 0.3,
+    rectRadius: 0.12,
+    fill: { color: style.soft },
+    line: { color: style.accent, width: 1 },
+  });
+  slide.addText(label, {
+    x: x + 0.12,
+    y: y + 0.055,
+    w: w - 0.24,
+    h: 0.18,
+    fontFace: 'Arial',
+    fontSize: 10.5,
+    bold: true,
+    color: style.accent,
+    margin: 0,
+    align: 'center',
+  });
+}
+
+function sectionStyleForTitle(title) {
+  if (/Positional Embedding|RoPE|ALiBi|NoPE/i.test(title)) return SECTION_STYLES.position;
+  if (/Dropout|LayerNorm|RMSNorm|QK-Norm/i.test(title)) return SECTION_STYLES.norm;
+  if (/Attention|KV Cache|MQA|GQA|MHA|MLA|Sliding Window|Scaled Dot-Product/i.test(title)) {
+    return SECTION_STYLES.attention;
+  }
+  if (/Mixture-of-Experts|MoE/i.test(title)) return SECTION_STYLES.sparse;
+  return SECTION_STYLES.activation;
+}
+
+function citationForTitle(title) {
+  const map = {
+    'Positional Embedding': {
+      introduced: 'Vaswani et al., Attention Is All You Need (2017)',
+      usedIn: 'GPT-2, BERT, GPT-3',
+    },
+    'RoPE (Rotary Position Embeddings)': {
+      introduced: 'Su et al., RoFormer (2021)',
+      usedIn: 'LLaMA/Llama 2/3, DeepSeek-V2/V3',
+    },
+    'ALiBi (Attention with Linear Biases)': {
+      introduced: 'Press et al., Train Short, Test Long (2021)',
+      usedIn: 'BLOOM, MPT',
+    },
+    'NoPE (No Positional Embeddings)': {
+      introduced: 'Haviv et al., Transformer LMs without Positional Encodings... (2022)',
+      usedIn: 'Mostly research decoder-only LMs; uncommon in mainstream frontier LLMs',
+    },
+    'Dropout': {
+      introduced: 'Srivastava et al., Dropout (2014)',
+      usedIn: 'Transformer, BERT, GPT-2',
+    },
+    'LayerNorm': {
+      introduced: 'Ba et al., Layer Normalization (2016)',
+      usedIn: 'Transformer, BERT, GPT-2, OPT',
+    },
+    'RMSNorm': {
+      introduced: 'Zhang & Sennrich, RMSNorm (2019)',
+      usedIn: 'LLaMA/Llama 2, Mistral, OpenELM',
+    },
+    'Scaled Dot-Product Attention': {
+      introduced: 'Vaswani et al., Attention Is All You Need (2017)',
+      usedIn: 'BERT, GPT-2, Llama 2/3',
+    },
+    'Multi-Head Attention (MHA)': {
+      introduced: 'Vaswani et al., Attention Is All You Need (2017)',
+      usedIn: 'Transformer, BERT, GPT-2/3',
+    },
+    'Multi-Query Attention (MQA)': {
+      introduced: 'Shazeer, Fast Transformer Decoding (2019)',
+      usedIn: 'PaLM, Falcon, StarCoder',
+    },
+    'Grouped-Query Attention (GQA)': {
+      introduced: 'Ainslie et al., GQA (2023)',
+      usedIn: 'Llama 2 70B, Llama 3, OpenELM',
+    },
+    'Multi-Head Latent Attention (MLA)': {
+      introduced: 'DeepSeek-AI, DeepSeek-V2 (2024)',
+      usedIn: 'DeepSeek-V2, DeepSeek-V3, DeepSeek-R1',
+    },
+    'Sliding Window Attention (SWA)': {
+      introduced: 'Beltagy et al., Longformer (2020)',
+      usedIn: 'Longformer, Mistral 7B',
+    },
+    'KV Cache': {
+      introduced: 'Vaswani et al., Attention Is All You Need (2017); fast-decoding analysis in Shazeer (2019)',
+      usedIn: 'GPT-2/3, Llama 2/3, DeepSeek',
+    },
+    'QK-Norm': {
+      introduced: 'Henry et al., Query-Key Normalization for Transformers (2020)',
+      usedIn: 'OLMo 2, Chameleon',
+    },
+    'Mixture-of-Experts (MoE)': {
+      introduced: 'Jacobs et al., Adaptive Mixtures of Local Experts (1991); Transformer-scale MoE: Shazeer et al. (2017)',
+      usedIn: 'Switch Transformer, Mixtral, DeepSeek-V2/V3',
+    },
+    'GELU': {
+      introduced: 'Hendrycks & Gimpel, GELUs (2016)',
+      usedIn: 'BERT, GPT-2, Falcon',
+    },
+    'SiLU / Swish': {
+      introduced: 'Elfwing et al., SiLU (2017); popularized as Swish by Ramachandran et al. (2017)',
+      usedIn: 'Inside SwiGLU in PaLM, Llama 2/3, Mistral',
+    },
+    'SwiGLU': {
+      introduced: 'Shazeer, GLU Variants Improve Transformer (2020)',
+      usedIn: 'PaLM, Llama 2/3, Mistral, OpenELM',
+    },
+  };
+  return map[title] || {
+    introduced: 'Primary citation to be filled',
+    usedIn: 'Representative LLM models to be filled',
+  };
+}
+
 function codeRuns(code) {
   return codeToRuns(code.trim(), 'python').map((run) => ({
     text: run.text,
@@ -148,6 +293,7 @@ function drawMultilineText(lines, x, y, w, h, opts = {}) {
 function flowDiagramSvg(spec) {
   const width = spec.width || 800;
   const height = spec.height || 360;
+  const frameAccent = spec.accent || '#E2E8F0';
   const defs = `
     <defs>
       <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -185,7 +331,8 @@ function flowDiagramSvg(spec) {
   return `
   <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     ${defs}
-    <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="22" ry="22" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="2" />
+    <rect x="1" y="1" width="${width - 2}" height="${height - 2}" rx="22" ry="22" fill="#FFFFFF" stroke="${frameAccent}" stroke-width="2" />
+    <rect x="18" y="16" width="120" height="8" rx="4" ry="4" fill="${frameAccent}" opacity="0.35" />
     ${edges}
     ${nodes}
     ${caption}
@@ -194,6 +341,27 @@ function flowDiagramSvg(spec) {
 
 function addTitleSlide() {
   const slide = pptx.addSlide('LLM_MASTER');
+  slide.addShape(pptx.ShapeType.roundRect, {
+    x: 9.45,
+    y: 0.72,
+    w: 2.95,
+    h: 0.52,
+    rectRadius: 0.16,
+    fill: { color: 'E0E7FF' },
+    line: { color: 'C7D2FE', width: 1 },
+  });
+  slide.addText('Refined deck • +4 new components', {
+    x: 9.58,
+    y: 0.87,
+    w: 2.65,
+    h: 0.18,
+    fontFace: 'Arial',
+    fontSize: 11,
+    bold: true,
+    color: SECTION_STYLES.attention.accent,
+    margin: 0,
+    align: 'center',
+  });
   slide.addText('LLM Architecture Components', {
     x: 0.6,
     y: 0.72,
@@ -216,24 +384,39 @@ function addTitleSlide() {
     margin: 0,
   });
 
-  addCard(slide, 0.6, 2.0, 6.0, 4.35, { title: 'What this deck covers' });
+  addSectionBadge(slide, SECTION_STYLES.position.label, 0.62, 1.78, 1.7, SECTION_STYLES.position);
+  addSectionBadge(slide, SECTION_STYLES.norm.label, 2.45, 1.78, 2.25, SECTION_STYLES.norm);
+  addSectionBadge(slide, SECTION_STYLES.attention.label, 4.85, 1.78, 1.95, SECTION_STYLES.attention);
+  addSectionBadge(slide, SECTION_STYLES.activation.label, 6.95, 1.78, 2.15, SECTION_STYLES.activation);
+
+  addCard(slide, 0.6, 2.2, 6.0, 4.15, {
+    title: 'What this deck covers',
+    fill: 'FCFCFD',
+    accent: SECTION_STYLES.attention.accent,
+    titleColor: SECTION_STYLES.attention.accent,
+  });
   drawBulletList(
     slide,
     [
-      'Embedding & position: Positional Embedding, RoPE, NoPE',
+      'Embedding & position: Positional Embedding, RoPE, ALiBi, NoPE',
       'Normalization & regularization: Dropout, LayerNorm, RMSNorm, QK-Norm',
-      'Attention family: Scaled Dot-Product, MHA, GQA, MLA, Sliding Window Attention',
-      'Sparse capacity & activations: Mixture-of-Experts, GELU, SiLU',
+      'Attention family: Scaled Dot-Product, MHA, MQA, GQA, MLA, Sliding Window Attention, KV cache',
+      'Sparse capacity & activations: Mixture-of-Experts, GELU, SiLU, SwiGLU',
       'Every component slide includes: formula, tensor-shape flow diagram, and PyTorch code',
     ],
     0.85,
-    2.48,
+    2.68,
     5.4,
-    3.35,
+    3.05,
     { fontSize: 14 }
   );
 
-  addCard(slide, 7.0, 2.0, 5.73, 4.35, { title: 'Notation used throughout' });
+  addCard(slide, 7.0, 2.2, 5.73, 4.15, {
+    title: 'Notation used throughout',
+    fill: 'FCFCFD',
+    accent: SECTION_STYLES.position.accent,
+    titleColor: SECTION_STYLES.position.accent,
+  });
   drawBulletList(
     slide,
     [
@@ -244,9 +427,9 @@ function addTitleSlide() {
       'PyTorch snippets assume: import torch, torch.nn as nn, torch.nn.functional as F',
     ],
     7.25,
-    2.48,
+    2.68,
     5.2,
-    3.35,
+    3.05,
     { fontSize: 14 }
   );
 
@@ -288,32 +471,64 @@ function addOverviewSlide() {
     margin: 0,
   });
 
-  addCard(slide, 0.6, 1.45, 4.05, 5.3, { title: 'Embedding & position' });
-  drawBulletList(slide, ['Positional Embedding', 'RoPE', 'NoPE'], 0.86, 1.95, 3.5, 1.5, { fontSize: 15 });
+  addCard(slide, 0.6, 1.45, 5.9, 2.2, {
+    title: SECTION_STYLES.position.label,
+    fill: SECTION_STYLES.position.soft2,
+    accent: SECTION_STYLES.position.accent,
+    titleColor: SECTION_STYLES.position.accent,
+  });
+  drawBulletList(slide, ['Positional Embedding', 'RoPE', 'ALiBi', 'NoPE'], 0.9, 1.93, 5.1, 1.35, { fontSize: 14.5 });
 
-  addCard(slide, 4.85, 1.45, 4.05, 5.3, { title: 'Attention & normalization' });
+  addCard(slide, 6.83, 1.45, 5.9, 2.2, {
+    title: SECTION_STYLES.attention.label,
+    fill: SECTION_STYLES.attention.soft2,
+    accent: SECTION_STYLES.attention.accent,
+    titleColor: SECTION_STYLES.attention.accent,
+  });
   drawBulletList(
     slide,
-    ['Dropout', 'LayerNorm', 'RMSNorm', 'Scaled Dot-Product Attention', 'Multi-Head Attention', 'Grouped-Query Attention', 'Multi-Head Latent Attention', 'Sliding Window Attention', 'QK-Norm'],
-    5.1,
-    1.95,
-    3.55,
-    4.2,
-    { fontSize: 14 }
+    ['Scaled Dot-Product Attention', 'Multi-Head Attention', 'MQA', 'GQA', 'MLA', 'Sliding Window Attention', 'KV cache'],
+    7.13,
+    1.93,
+    5.05,
+    1.45,
+    { fontSize: 13.2 }
   );
 
-  addCard(slide, 9.1, 1.45, 3.63, 5.3, { title: 'Sparse compute & activations' });
-  drawBulletList(slide, ['Mixture-of-Experts', 'GELU', 'SiLU'], 9.35, 1.95, 3.1, 1.5, { fontSize: 15 });
-  slide.addText('Each slide is intentionally pedagogical rather than model-specific; the shapes describe the common tensor contracts used in PyTorch LLM implementations.', {
-    x: 9.35,
-    y: 4.8,
-    w: 2.95,
-    h: 1.2,
+  addCard(slide, 0.6, 4.0, 5.9, 2.35, {
+    title: SECTION_STYLES.norm.label,
+    fill: SECTION_STYLES.norm.soft2,
+    accent: SECTION_STYLES.norm.accent,
+    titleColor: SECTION_STYLES.norm.accent,
+  });
+  drawBulletList(slide, ['Dropout', 'LayerNorm', 'RMSNorm', 'QK-Norm'], 0.9, 4.5, 5.1, 1.0, { fontSize: 14.5 });
+  slide.addText('These slides focus on stability, regularization, and how score magnitudes are controlled during training and inference.', {
+    x: 0.9,
+    y: 5.88,
+    w: 5.1,
+    h: 0.28,
     fontFace: 'Arial',
-    fontSize: 11,
+    fontSize: 10.5,
     color: COLORS.slate,
     margin: 0,
-    valign: 'top',
+  });
+
+  addCard(slide, 6.83, 4.0, 5.9, 2.35, {
+    title: 'Sparse capacity & activations',
+    fill: 'FFFBEB',
+    accent: SECTION_STYLES.activation.accent,
+    titleColor: SECTION_STYLES.activation.accent,
+  });
+  drawBulletList(slide, ['Mixture-of-Experts', 'GELU', 'SiLU', 'SwiGLU'], 7.13, 4.5, 5.05, 1.0, { fontSize: 14.5 });
+  slide.addText('Each slide is pedagogical rather than model-specific: shapes reflect the common PyTorch tensor contracts used in LLM implementations.', {
+    x: 7.13,
+    y: 5.88,
+    w: 5.05,
+    h: 0.28,
+    fontFace: 'Arial',
+    fontSize: 10.5,
+    color: COLORS.slate,
+    margin: 0,
   });
 
   warnIfSlideHasOverlaps(slide, pptx);
@@ -322,6 +537,10 @@ function addOverviewSlide() {
 
 function addComponentSlide(component) {
   const slide = pptx.addSlide('LLM_MASTER');
+  const section = sectionStyleForTitle(component.title);
+  const citation = citationForTitle(component.title);
+  const formulaSvg = latexToSvgDataUri(component.formula);
+
   slide.addText(component.title, {
     x: 0.62,
     y: 0.52,
@@ -333,28 +552,31 @@ function addComponentSlide(component) {
     color: COLORS.ink,
     margin: 0,
   });
+  addSectionBadge(slide, section.label, 10.08, 0.56, 2.65, section);
   slide.addText(component.summary, {
     x: 0.64,
     y: 0.92,
-    w: 5.95,
-    h: 0.34,
+    w: 9.2,
+    h: 0.28,
     fontFace: 'Arial',
     fontSize: 13,
     color: COLORS.slate,
     margin: 0,
   });
 
-  addCard(slide, leftX, 1.28, leftW, 1.34, { title: 'Math formula / tensor contract' });
+  addCard(slide, leftX, 1.28, leftW, 1.34, {
+    title: 'Math formula / tensor contract',
+    fill: section.soft2,
+    accent: section.accent,
+    titleColor: section.accent,
+  });
   slide.addImage({
-    data: latexToSvgDataUri(component.formula),
-    x: leftX + 0.22,
-    y: 1.7,
-    w: leftW - 0.44,
-    h: 0.55,
+    data: formulaSvg,
+    ...imageSizingContain(formulaSvg, leftX + 0.22, 1.69, leftW - 0.44, 0.50),
   });
   slide.addText(component.formulaNote, {
     x: leftX + 0.22,
-    y: 2.30,
+    y: 2.27,
     w: leftW - 0.44,
     h: 0.22,
     fontFace: 'Arial',
@@ -363,16 +585,26 @@ function addComponentSlide(component) {
     margin: 0,
   });
 
-  addCard(slide, leftX, 2.82, leftW, 3.85, { title: 'Shape-aware diagram' });
+  addCard(slide, leftX, 2.82, leftW, 3.85, {
+    title: 'Shape-aware diagram',
+    fill: COLORS.panel,
+    titleColor: section.accent,
+  });
   slide.addImage({
-    data: svgToDataUri(flowDiagramSvg(component.diagram)),
+    data: svgToDataUri(flowDiagramSvg({ ...component.diagram, accent: section.accent })),
     x: leftX + 0.12,
     y: 3.18,
     w: leftW - 0.24,
     h: 3.22,
   });
 
-  addCard(slide, rightX, 1.28, rightW, 5.39, { title: 'PyTorch implementation', fill: COLORS.codeBg, line: COLORS.codeLine, titleColor: 'E2E8F0' });
+  addCard(slide, rightX, 1.28, rightW, 5.39, {
+    title: 'PyTorch implementation',
+    fill: COLORS.codeBg,
+    line: section.accent,
+    accent: section.accent,
+    titleColor: 'E2E8F0',
+  });
   slide.addText(codeRuns(component.code), {
     x: rightX + 0.18,
     y: 1.62,
@@ -382,17 +614,26 @@ function addComponentSlide(component) {
     valign: 'top',
     breakLine: false,
     color: 'FFFFFF',
-    fit: 'shrink',
   });
 
   slide.addText(component.legend, {
     x: 0.62,
-    y: 6.92,
+    y: 6.76,
     w: 11.8,
-    h: 0.18,
+    h: 0.16,
     fontFace: 'Arial',
-    fontSize: 10,
-    color: 'E2E8F0',
+    fontSize: 9.2,
+    color: COLORS.muted,
+    margin: 0,
+  });
+  slide.addText(`Introduced in: ${citation.introduced}   •   Used in: ${citation.usedIn}`, {
+    x: 0.62,
+    y: 6.95,
+    w: 11.8,
+    h: 0.20,
+    fontFace: 'Arial',
+    fontSize: 9.0,
+    color: COLORS.ink,
     margin: 0,
   });
 
@@ -469,6 +710,40 @@ const components = [
 
 q = apply_rope(q, cos, sin)   # [B,H,T,d_h]
 k = apply_rope(k, cos, sin)   # [B,H,T,d_h]`,
+  },
+  {
+    title: 'ALiBi (Attention with Linear Biases)',
+    summary: 'Adds a head-specific linear distance penalty directly to attention scores so the model can represent recency bias without explicit positional vectors.',
+    formula: String.raw`S_{ij}^{(h)} = \frac{\mathbf{q}_i^{(h)}\mathbf{k}_j^{(h)\top}}{\sqrt{d_h}} - m_h(i-j),\qquad j \le i`,
+    formulaNote: 'Different heads use different slopes m_h, giving a spectrum from local to more global attention bias.',
+    legend: 'Shapes: Q,K [B,H,T,d_h], raw scores [B,H,T,T], ALiBi bias [H,T,T], biased scores [B,H,T,T].',
+    diagram: {
+      nodes: [
+        { x: 25, y: 85, w: 135, h: 80, label: 'Q', shape: '[B,H,T,d_h]', fill: '#E8F0FE', stroke: '#2563EB' },
+        { x: 25, y: 235, w: 135, h: 80, label: 'K', shape: '[B,H,T,d_h]', fill: '#E8F0FE', stroke: '#2563EB' },
+        { x: 215, y: 125, w: 155, h: 90, label: 'QKᵀ / √d_h', shape: '[B,H,T,T]', fill: '#FEF3C7', stroke: '#D97706' },
+        { x: 215, y: 250, w: 155, h: 80, label: 'ALiBi slopes', shape: '[H] → [H,T,T]', fill: '#ECFEFF', stroke: '#0891B2' },
+        { x: 430, y: 150, w: 145, h: 90, label: 'Add bias', shape: '[B,H,T,T]', fill: '#EEF2FF', stroke: '#6366F1' },
+        { x: 635, y: 150, w: 130, h: 90, label: 'Biased scores', shape: '[B,H,T,T]', fill: '#ECFDF5', stroke: '#059669' },
+      ],
+      edges: [
+        { x1: 160, y1: 125, x2: 215, y2: 160 },
+        { x1: 160, y1: 275, x2: 215, y2: 185 },
+        { x1: 370, y1: 170, x2: 430, y2: 182 },
+        { x1: 370, y1: 290, x2: 430, y2: 208 },
+        { x1: 575, y1: 195, x2: 635, y2: 195 },
+      ],
+      caption: 'ALiBi changes only the score matrix, so no extra position embeddings or rotary rotations are stored.'
+    },
+    code: `def alibi_attention(q, k, v, slopes):
+    B, H, T, D = q.shape
+    pos = torch.arange(T, device=q.device)
+    dist = (pos[:, None] - pos[None, :]).clamp_min(0)      # [T,T]
+    bias = -slopes[:, None, None] * dist.unsqueeze(0)      # [H,T,T]
+    scores = q @ k.transpose(-2, -1) / D ** 0.5
+    scores = scores + bias.unsqueeze(0)
+    weights = scores.softmax(dim=-1)
+    return weights @ v`,
   },
   {
     title: 'NoPE (No Positional Embeddings)',
@@ -685,6 +960,48 @@ k = apply_rope(k, cos, sin)   # [B,H,T,d_h]`,
         return self.out(y)`,
   },
   {
+    title: 'Multi-Query Attention (MQA)',
+    summary: 'Uses many query heads but a single shared key/value head, giving the smallest KV cache among standard attention-sharing variants.',
+    formula: String.raw`\operatorname{head}_h = \operatorname{Attn}(\mathbf{Q}_h,\mathbf{K}_1,\mathbf{V}_1),\qquad h=1,\dots,H`,
+    formulaNote: 'MQA is the extreme sharing case: all query heads reuse the same K and V tensors.',
+    legend: 'Shapes: Q [B,H,T,d_h], K/V [B,1,T,d_h], expanded shared KV [B,H,T,d_h], output [B,T,d].',
+    diagram: {
+      nodes: [
+        { x: 20, y: 150, w: 130, h: 82, label: 'X', shape: '[B,T,d]', fill: '#E8F0FE', stroke: '#2563EB' },
+        { x: 185, y: 70, w: 165, h: 82, label: 'Q proj', shape: '[B,H,T,d_h]', fill: '#EEF2FF', stroke: '#6366F1' },
+        { x: 185, y: 230, w: 165, h: 82, label: 'Shared KV proj', shape: '[B,1,T,d_h]', fill: '#ECFEFF', stroke: '#0891B2' },
+        { x: 410, y: 230, w: 165, h: 82, label: 'Broadcast KV', shape: '[B,H,T,d_h]', fill: '#EDE9FE', stroke: '#7C3AED' },
+        { x: 410, y: 70, w: 165, h: 82, label: 'Per-head queries', shape: '[B,H,T,d_h]', fill: '#EEF2FF', stroke: '#6366F1' },
+        { x: 630, y: 150, w: 135, h: 82, label: 'Attention', shape: '[B,H,T,d_h]', fill: '#FEF3C7', stroke: '#D97706' },
+      ],
+      edges: [
+        { x1: 150, y1: 191, x2: 185, y2: 111 },
+        { x1: 150, y1: 191, x2: 185, y2: 271 },
+        { x1: 350, y1: 111, x2: 410, y2: 111 },
+        { x1: 350, y1: 271, x2: 410, y2: 271 },
+        { x1: 575, y1: 111, x2: 630, y2: 174 },
+        { x1: 575, y1: 271, x2: 630, y2: 208 },
+      ],
+      caption: 'MQA minimizes memory bandwidth during decoding because only one KV stream is cached per token.'
+    },
+    code: `class MultiQueryAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        super().__init__()
+        self.h = num_heads
+        self.d_h = d_model // num_heads
+        self.wq = nn.Linear(d_model, num_heads * self.d_h)
+        self.wk = nn.Linear(d_model, self.d_h)
+        self.wv = nn.Linear(d_model, self.d_h)
+
+    def forward(self, x):
+        B, T, _ = x.shape
+        q = self.wq(x).view(B, T, self.h, self.d_h).transpose(1, 2)
+        k = self.wk(x).unsqueeze(1)                         # [B,1,T,d_h]
+        v = self.wv(x).unsqueeze(1)
+        y = scaled_dot_product_attention(q, k.expand(-1, self.h, -1, -1), v.expand(-1, self.h, -1, -1))
+        return y`,
+  },
+  {
     title: 'Grouped-Query Attention (GQA)',
     summary: 'Uses many query heads but fewer K/V groups, reducing KV-cache memory and decode bandwidth while keeping more query diversity than MQA.',
     formula: String.raw`\operatorname{head}_h = \operatorname{Attn}(\mathbf{Q}_h, \mathbf{K}_{g(h)}, \mathbf{V}_{g(h)}),\qquad G < H` ,
@@ -806,6 +1123,38 @@ k = apply_rope(k, cos, sin)   # [B,H,T,d_h]`,
     mask = too_old | causal
     scores = scores.masked_fill(mask, float('-inf'))
     return scores.softmax(dim=-1) @ v`,
+  },
+  {
+    title: 'KV Cache',
+    summary: 'Stores past keys and values during autoregressive decoding so each new token only computes attention against the growing cache instead of recomputing old projections.',
+    formula: String.raw`\mathbf{K}_{cache}^{(t)} = \operatorname{Concat}(\mathbf{K}_{cache}^{(t-1)}, \mathbf{k}_t),\qquad \mathbf{V}_{cache}^{(t)} = \operatorname{Concat}(\mathbf{V}_{cache}^{(t-1)}, \mathbf{v}_t)`,
+    formulaNote: 'At decode step t, the query has sequence length 1 while the cached K/V length grows with t.',
+    legend: 'Shapes: x_t [B,1,d], q_t [B,H,1,d_h], cached K/V [B,H,t,d_h], output y_t [B,H,1,d_h].',
+    diagram: {
+      nodes: [
+        { x: 20, y: 150, w: 120, h: 82, label: 'x_t', shape: '[B,1,d]', fill: '#E8F0FE', stroke: '#2563EB' },
+        { x: 170, y: 60, w: 145, h: 82, label: 'q_t proj', shape: '[B,H,1,d_h]', fill: '#EEF2FF', stroke: '#6366F1' },
+        { x: 170, y: 240, w: 145, h: 82, label: 'k_t / v_t proj', shape: '[B,H,1,d_h]', fill: '#ECFEFF', stroke: '#0891B2' },
+        { x: 375, y: 240, w: 165, h: 82, label: 'Append to cache', shape: '[B,H,t,d_h]', fill: '#EDE9FE', stroke: '#7C3AED' },
+        { x: 590, y: 150, w: 160, h: 92, label: 'Decode attention', shape: '[B,H,1,d_h]', fill: '#FEF3C7', stroke: '#D97706' },
+      ],
+      edges: [
+        { x1: 140, y1: 191, x2: 170, y2: 101 },
+        { x1: 140, y1: 191, x2: 170, y2: 281 },
+        { x1: 315, y1: 281, x2: 375, y2: 281 },
+        { x1: 315, y1: 101, x2: 590, y2: 180 },
+        { x1: 540, y1: 281, x2: 590, y2: 212 },
+      ],
+      caption: 'The KV cache is an inference-time optimization: it trades memory for much faster decode steps.'
+    },
+    code: `def decode_step(x_t, k_cache, v_cache, wq, wk, wv):
+    q_t = wq(x_t)                                  # [B,H,1,d_h]
+    k_t = wk(x_t)
+    v_t = wv(x_t)
+    k_cache = torch.cat([k_cache, k_t], dim=-2)    # [B,H,t,d_h]
+    v_cache = torch.cat([v_cache, v_t], dim=-2)
+    y_t = scaled_dot_product_attention(q_t, k_cache, v_cache)
+    return y_t, k_cache, v_cache`,
   },
   {
     title: 'QK-Norm',
@@ -940,6 +1289,43 @@ k = apply_rope(k, cos, sin)   # [B,H,T,d_h]`,
 
 # equivalent:
 # y = x * torch.sigmoid(x)`,
+  },
+  {
+    title: 'SwiGLU',
+    summary: 'A gated feed-forward block that combines a SiLU gate branch with a value branch before projecting back to the model dimension.',
+    formula: String.raw`\operatorname{SwiGLU}(\mathbf{x}) = \left(\operatorname{SiLU}(\mathbf{x}W_g)\odot(\mathbf{x}W_u)\right)W_d`,
+    formulaNote: 'SwiGLU is commonly used in modern Transformer MLPs because the gate improves expressivity at similar compute cost.',
+    legend: 'Shapes: x [B,T,d], gate/up [B,T,d_{ff}], gated product [B,T,d_{ff}], output [B,T,d].',
+    diagram: {
+      nodes: [
+        { x: 30, y: 150, w: 120, h: 82, label: 'x', shape: '[B,T,d]', fill: '#E8F0FE', stroke: '#2563EB' },
+        { x: 190, y: 65, w: 150, h: 82, label: 'Gate proj', shape: '[B,T,d_ff]', fill: '#EEF2FF', stroke: '#6366F1' },
+        { x: 190, y: 150, w: 150, h: 82, label: 'SiLU', shape: '[B,T,d_ff]', fill: '#FEF3C7', stroke: '#D97706' },
+        { x: 190, y: 235, w: 150, h: 82, label: 'Up proj', shape: '[B,T,d_ff]', fill: '#ECFEFF', stroke: '#0891B2' },
+        { x: 400, y: 150, w: 135, h: 82, label: 'Multiply', shape: '[B,T,d_ff]', fill: '#EDE9FE', stroke: '#7C3AED' },
+        { x: 600, y: 150, w: 150, h: 82, label: 'Down proj', shape: '[B,T,d]', fill: '#ECFDF5', stroke: '#059669' },
+      ],
+      edges: [
+        { x1: 150, y1: 191, x2: 190, y2: 106 },
+        { x1: 150, y1: 191, x2: 190, y2: 276 },
+        { x1: 340, y1: 106, x2: 340, y2: 150 },
+        { x1: 340, y1: 191, x2: 400, y2: 176 },
+        { x1: 340, y1: 276, x2: 400, y2: 206 },
+        { x1: 535, y1: 191, x2: 600, y2: 191 },
+      ],
+      caption: 'SwiGLU replaces a plain activation with a learned gate/value interaction in the feed-forward block.'
+    },
+    code: `class SwiGLU(nn.Module):
+    def __init__(self, d_model, d_ff):
+        super().__init__()
+        self.wg = nn.Linear(d_model, d_ff, bias=False)
+        self.wu = nn.Linear(d_model, d_ff, bias=False)
+        self.wo = nn.Linear(d_ff, d_model, bias=False)
+
+    def forward(self, x):
+        gate = F.silu(self.wg(x))
+        up = self.wu(x)
+        return self.wo(gate * up)`,
   },
 ];
 

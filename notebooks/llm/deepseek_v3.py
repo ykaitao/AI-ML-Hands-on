@@ -21,11 +21,11 @@ import torch
 from transformers import (
     DeepseekV3Config,
     DeepseekV3ForCausalLM,
+    Trainer,
 )
 
 from workshop_common import (
     build_workshop_paths,
-    build_trainer,
     build_training_args,
     detect_device_and_optimizer,
     generate_and_print_samples,
@@ -33,7 +33,6 @@ from workshop_common import (
     load_text_dataset_with_validation,
     prepare_causal_lm_datasets,
     print_dataset_overview,
-    print_runtime_info,
     print_tokenizer_preview,
     train_and_report,
 )
@@ -50,7 +49,7 @@ print_dataset_overview(dataset)
 
 # %% Device & optimizer detection
 device_type, optim_type = detect_device_and_optimizer()
-print_runtime_info(device_type, optim_type)
+print(f"Device: {device_type}, Optimizer: {optim_type}")
 
 # %% Tokenizer: Train or load
 tokenizer = load_or_train_byte_level_bpe_tokenizer(
@@ -125,7 +124,12 @@ training_args = build_training_args(
     logging_steps=1,
 )
 
-trainer = build_trainer(model, training_args, lm_datasets)
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=lm_datasets["train"],
+    eval_dataset=lm_datasets["validation"],
+)
 
 # Stepwise debugging:
 # 1. Open .venv/lib/python3.11/site-packages/transformers/models/deepseek_v3/modeling_deepseek_v3.py
