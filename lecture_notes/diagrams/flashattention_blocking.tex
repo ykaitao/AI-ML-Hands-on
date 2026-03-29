@@ -1,0 +1,55 @@
+\begin{tikzpicture}[>=latex, scale=1.0]
+
+% Timeline of tokens
+\node at (0,4.5) {\Large Token stream (time)};
+\foreach \i/\t in {0/$t=0$,1/$t=1$,2/$t=2$,3/$t=3$} {
+  \draw[fill=blue!10] (\i*1.8,3.8) rectangle (\i*1.8+1.4,4.6);
+  \node at (\i*1.8+0.7,4.2) {$x_{\i}$};
+  \node[below] at (\i*1.8+0.7,3.7) {\t};
+}
+
+% Current token highlight
+\draw[red, thick, rounded corners] (3*1.8-0.2,3.6) rectangle (3*1.8+1.6,4.8);
+\node[red] at (3*1.8+0.7,5.1) {current};
+
+% Q projection for current token
+\draw[fill=cyan!15] (5,3.8) rectangle (6.6,4.6);
+\node at (5.8,4.2) {$Q_t$};
+\draw[->, thick] (3*1.8+1.4,4.2) -- (5,4.2);
+
+% KV projection for current token
+\draw[fill=green!15] (5,2.4) rectangle (6.6,3.2);
+\node at (5.8,2.8) {$K_t, V_t$};
+\draw[->, thick] (3*1.8+1.4,3.9) .. controls (4.0,3.0) .. (5,2.8);
+
+% Paged KV cache block
+\node at (0,1.6) {\Large Paged KV cache};
+
+\draw[fill=gray!5] (0,0) rectangle (7,2.2);
+\node[anchor=west] at (0.1,2.2) {$\texttt{paged\_attention}[{\color{red}0:\,t}]$};
+
+% Individual rows in paged_attention_K / V
+\foreach \i/\lab in {0/$K_0,V_0$,1/$K_1,V_1$,2/$K_2,V_2$,3/$K_3,V_3$} {
+  \draw[fill=green!10] (0.2,0.2+\i*0.45) rectangle (3.5,0.55+\i*0.45);
+  \node[anchor=west] at (0.3,0.375+\i*0.45) {\lab};
+}
+
+% Arrow from current K,V into cache row t
+\draw[->, thick] (6.6,2.8) .. controls (7.4,2.0) and (7.4,1.0) .. (3.5,1.55);
+
+\node[anchor=west] at (3.7,1.55) {store at index $t$};
+
+% Attention computation using cache
+\draw[fill=orange!15] (7.5,0.4) rectangle (10.5,2.0);
+\node at (9.0,1.2) {$\text{Attention}(Q_t, K_{\le t}, V_{\le t})$};
+
+% Arrows from cache and Q_t to attention block
+\draw[->, thick] (6.6,4.2) -- (7.5,1.8);
+\draw[->, thick] (7,1.1) -- (7.5,1.1);
+
+% Output
+\draw[fill=purple!15] (11.0,1.0) rectangle (12.4,1.8);
+\node at (11.7,1.4) {$h_t$};
+\draw[->, thick] (10.5,1.2) -- (11.0,1.4);
+
+\end{tikzpicture}
