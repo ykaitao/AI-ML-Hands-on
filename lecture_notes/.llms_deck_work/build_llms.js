@@ -342,18 +342,18 @@ function flowDiagramSvg(spec) {
 function addTitleSlide() {
   const slide = pptx.addSlide('LLM_MASTER');
   slide.addShape(pptx.ShapeType.roundRect, {
-    x: 9.45,
-    y: 0.72,
-    w: 2.95,
-    h: 0.52,
+    x: 9.72,
+    y: 0.7,
+    w: 2.48,
+    h: 0.5,
     rectRadius: 0.16,
     fill: { color: 'E0E7FF' },
     line: { color: 'C7D2FE', width: 1 },
   });
-  slide.addText('Refined deck • +4 new components', {
-    x: 9.58,
-    y: 0.87,
-    w: 2.65,
+  slide.addText('Merged overview', {
+    x: 9.84,
+    y: 0.85,
+    w: 2.2,
     h: 0.18,
     fontFace: 'Arial',
     fontSize: 11,
@@ -364,80 +364,124 @@ function addTitleSlide() {
   });
   slide.addText('LLM Architecture Components', {
     x: 0.6,
-    y: 0.72,
-    w: 8.6,
-    h: 0.6,
+    y: 0.68,
+    w: 7.7,
+    h: 0.55,
     fontFace: 'Arial',
     fontSize: 26,
     bold: true,
     color: COLORS.ink,
     margin: 0,
   });
-  slide.addText('Formulas, tensor-shape diagrams, and PyTorch reference implementations', {
+  slide.addText('One-slide roadmap: from embeddings and positional structure to attention, normalization, and feed-forward variants used in modern LLMs', {
     x: 0.62,
-    y: 1.36,
-    w: 7.8,
-    h: 0.3,
+    y: 1.3,
+    w: 9.4,
+    h: 0.28,
     fontFace: 'Arial',
-    fontSize: 15,
+    fontSize: 14,
     color: COLORS.slate,
     margin: 0,
   });
 
-  addSectionBadge(slide, SECTION_STYLES.position.label, 0.62, 1.78, 1.7, SECTION_STYLES.position);
-  addSectionBadge(slide, SECTION_STYLES.norm.label, 2.45, 1.78, 2.25, SECTION_STYLES.norm);
-  addSectionBadge(slide, SECTION_STYLES.attention.label, 4.85, 1.78, 1.95, SECTION_STYLES.attention);
-  addSectionBadge(slide, SECTION_STYLES.activation.label, 6.95, 1.78, 2.15, SECTION_STYLES.activation);
+  addCard(slide, 0.6, 1.78, 5.95, 1.82, {
+    title: 'Embedding',
+    fill: SECTION_STYLES.position.soft2,
+    accent: SECTION_STYLES.position.accent,
+    titleColor: SECTION_STYLES.position.accent,
+  });
+  drawBulletList(slide, ['Positional Embedding', 'RoPE', 'ALiBi', 'NoPE'], 0.9, 2.25, 5.1, 0.98, { fontSize: 14.3 });
+  slide.addText('These decide how token order is represented before or inside attention.', {
+    x: 0.9,
+    y: 3.32,
+    w: 5.0,
+    h: 0.16,
+    fontFace: 'Arial',
+    fontSize: 10.3,
+    color: COLORS.slate,
+    margin: 0,
+  });
 
-  addCard(slide, 0.6, 2.2, 6.0, 4.15, {
-    title: 'What this deck covers',
-    fill: 'FCFCFD',
+  addCard(slide, 6.78, 1.78, 5.95, 1.82, {
+    title: 'Attention',
+    fill: SECTION_STYLES.attention.soft2,
     accent: SECTION_STYLES.attention.accent,
     titleColor: SECTION_STYLES.attention.accent,
   });
-  drawBulletList(
-    slide,
-    [
-      'Embedding & position: Positional Embedding, RoPE, ALiBi, NoPE',
-      'Normalization & regularization: Dropout, LayerNorm, RMSNorm, QK-Norm',
-      'Attention family: Scaled Dot-Product, MHA, MQA, GQA, MLA, Sliding Window Attention, KV cache',
-      'Sparse capacity & activations: Mixture-of-Experts, GELU, SiLU, SwiGLU',
-      'Every component slide includes: formula, tensor-shape flow diagram, and PyTorch code',
-    ],
-    0.85,
-    2.68,
-    5.4,
-    3.05,
-    { fontSize: 14 }
-  );
+  drawBulletList(slide, ['Scaled Dot-Product', 'MHA', 'MQA', 'GQA', 'MLA', 'Sliding Window Attention', 'KV Cache'], 7.08, 2.15, 5.0, 1.12, { fontSize: 13.1 });
+  slide.addText('These govern token-token interaction patterns and decoding efficiency.', {
+    x: 7.08,
+    y: 3.32,
+    w: 5.0,
+    h: 0.16,
+    fontFace: 'Arial',
+    fontSize: 10.3,
+    color: COLORS.slate,
+    margin: 0,
+  });
 
-  addCard(slide, 7.0, 2.2, 5.73, 4.15, {
+  addCard(slide, 0.6, 3.95, 5.95, 1.82, {
+    title: 'Normalization',
+    fill: SECTION_STYLES.norm.soft2,
+    accent: SECTION_STYLES.norm.accent,
+    titleColor: SECTION_STYLES.norm.accent,
+  });
+  drawBulletList(slide, ['Dropout', 'LayerNorm', 'RMSNorm', 'QK-Norm'], 0.9, 4.42, 5.05, 0.95, { fontSize: 14.3 });
+  slide.addText('These control activation scale, training stability, and attention score magnitude.', {
+    x: 0.9,
+    y: 5.47,
+    w: 5.0,
+    h: 0.16,
+    fontFace: 'Arial',
+    fontSize: 10.3,
+    color: COLORS.slate,
+    margin: 0,
+  });
+
+  addCard(slide, 6.78, 3.95, 5.95, 1.82, {
+    title: 'FeedForward',
+    fill: 'FFFBEB',
+    accent: SECTION_STYLES.activation.accent,
+    titleColor: SECTION_STYLES.activation.accent,
+  });
+  drawBulletList(slide, ['Mixture-of-Experts', 'GELU', 'SiLU', 'SwiGLU'], 7.08, 4.42, 5.0, 0.95, { fontSize: 14.3 });
+  slide.addText('These determine per-token nonlinear transformation and sparse capacity scaling.', {
+    x: 7.08,
+    y: 5.47,
+    w: 5.0,
+    h: 0.16,
+    fontFace: 'Arial',
+    fontSize: 10.3,
+    color: COLORS.slate,
+    margin: 0,
+  });
+
+  addCard(slide, 0.6, 5.98, 12.13, 0.76, {
     title: 'Notation used throughout',
     fill: 'FCFCFD',
     accent: SECTION_STYLES.position.accent,
     titleColor: SECTION_STYLES.position.accent,
+    titleSize: 11,
   });
-  drawBulletList(
-    slide,
-    [
-      'B = batch size, T = sequence length, d = model dimension',
-      'H = number of attention heads, d_h = per-head dimension',
-      'G = number of KV groups (for GQA), r = latent rank (for MLA)',
-      'E = number of experts, k = top-k routed experts',
-      'PyTorch snippets assume: import torch, torch.nn as nn, torch.nn.functional as F',
-    ],
-    7.25,
-    2.68,
-    5.2,
-    3.05,
-    { fontSize: 14 }
-  );
+  slide.addText(`B=batch  •  T=sequence length  •  d=model dim  •  H=heads  •  d_h=per-head dim  •  G=KV groups  •  r=latent rank  •  E=experts  •  k=top-k routed experts
+PyTorch snippets assume: import torch, torch.nn as nn, torch.nn.functional as F`, {
+    x: 0.88,
+    y: 6.38,
+    w: 11.2,
+    h: 0.22,
+    fontFace: 'Arial',
+    fontSize: 9.3,
+    color: COLORS.slate,
+    margin: 0,
+    breakLine: false,
+    valign: 'mid',
+  });
 
   slide.addText('Created for lecture_notes/LLMs.pptx • editable PowerPoint deck authored with PptxGenJS', {
     x: 0.62,
-    y: 6.76,
+    y: 6.96,
     w: 8.2,
-    h: 0.22,
+    h: 0.18,
     fontFace: 'Arial',
     fontSize: 10,
     color: 'E2E8F0',
@@ -644,37 +688,43 @@ function addComponentSlide(component) {
 const components = [
   {
     title: 'Positional Embedding',
-    summary: 'Adds a position-dependent vector to token embeddings so the model can distinguish order before any attention happens.',
-    formula: String.raw`\mathbf{X}_0 = \mathbf{E}_{tok}[\mathbf{t}] + \mathbf{E}_{pos}[0{:}T-1],\qquad \mathbf{X}_0 \in \mathbb{R}^{B\times T\times d}`,
-    formulaNote: 'Learned and sinusoidal position tables both map each position index to a d-dimensional vector.',
-    legend: 'Shapes: token ids [B,T], token embeddings [B,T,d], position table [T,d], output hidden states [B,T,d].',
+    summary: 'The original Transformer paper uses fixed sinusoidal positional encodings, added to token embeddings at the bottoms of the encoder and decoder stacks.',
+    formula: String.raw`\operatorname{PE}_{(pos,2i)} = \sin\!\left(pos / 10000^{2i/d_{model}}\right),\qquad \operatorname{PE}_{(pos,2i+1)} = \cos\!\left(pos / 10000^{2i/d_{model}}\right)`,
+    formulaNote: 'In Attention Is All You Need, the stack input is √d_model · token_embedding + PE, with PE shared across the batch.',
+    legend: 'Shapes: token ids [B,T], token embeddings [B,T,d_model], sinusoidal PE table [T,d_model], stack input [B,T,d_model].',
     diagram: {
       nodes: [
-        { x: 30, y: 64, w: 175, h: 80, label: 'Token IDs', shape: '[B, T]', fill: '#E8F0FE', stroke: '#2563EB' },
-        { x: 240, y: 64, w: 190, h: 80, label: 'Token Embedding', shape: '[B, T, d]', fill: '#EEF2FF', stroke: '#6366F1' },
-        { x: 30, y: 220, w: 175, h: 80, label: 'Position IDs', shape: '[T]', fill: '#ECFEFF', stroke: '#0891B2' },
-        { x: 240, y: 220, w: 190, h: 80, label: 'Position Table', shape: '[T, d]', fill: '#ECFEFF', stroke: '#0891B2' },
-        { x: 495, y: 140, w: 92, h: 92, label: 'Add', shape: 'broadcast on B', fill: '#FEF3C7', stroke: '#D97706' },
-        { x: 630, y: 140, w: 135, h: 92, label: 'X₀', shape: '[B, T, d]', fill: '#ECFDF5', stroke: '#059669' },
+        { x: 25, y: 70, w: 165, h: 82, label: 'Token IDs', shape: '[B,T]', fill: '#E8F0FE', stroke: '#2563EB' },
+        { x: 220, y: 70, w: 175, h: 82, label: 'Embedding · √d_model', shape: '[B,T,d_model]', fill: '#EEF2FF', stroke: '#6366F1' },
+        { x: 25, y: 235, w: 165, h: 82, label: 'Positions', shape: '[T]', fill: '#ECFEFF', stroke: '#0891B2' },
+        { x: 220, y: 235, w: 175, h: 82, label: 'Sin / Cos PE', shape: '[T,d_model]', fill: '#ECFEFF', stroke: '#0891B2' },
+        { x: 455, y: 150, w: 110, h: 92, label: 'Add', shape: 'broadcast on B', fill: '#FEF3C7', stroke: '#D97706' },
+        { x: 625, y: 150, w: 150, h: 92, label: 'Encoder / Decoder input', shape: '[B,T,d_model]', fill: '#ECFDF5', stroke: '#059669' },
       ],
       edges: [
-        { x1: 205, y1: 104, x2: 240, y2: 104 },
-        { x1: 205, y1: 260, x2: 240, y2: 260 },
-        { x1: 430, y1: 104, x2: 495, y2: 170 },
-        { x1: 430, y1: 260, x2: 495, y2: 202 },
-        { x1: 587, y1: 186, x2: 630, y2: 186 },
+        { x1: 190, y1: 111, x2: 220, y2: 111 },
+        { x1: 190, y1: 276, x2: 220, y2: 276 },
+        { x1: 395, y1: 111, x2: 455, y2: 178 },
+        { x1: 395, y1: 276, x2: 455, y2: 214 },
+        { x1: 565, y1: 196, x2: 625, y2: 196 },
       ],
-      caption: 'Absolute position information enters by summing embeddings with a position-specific vector.'
+      caption: 'This matches the original Transformer: fixed sinusoidal PE is added to scaled token embeddings before entering the stack.'
     },
-    code: `class LearnedPositionalEmbedding(nn.Module):
-    def __init__(self, max_len, d_model):
+    code: `class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
         super().__init__()
-        self.pos = nn.Embedding(max_len, d_model)
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * (-torch.log(torch.tensor(10000.0)) / d_model)
+        )
+        pe = torch.zeros(max_len, d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))
 
-    def forward(self, x):
-        B, T, D = x.shape
-        pos_ids = torch.arange(T, device=x.device)
-        return x + self.pos(pos_ids)[None, :, :]`,
+    def forward(self, tok_emb):
+        tok_emb = tok_emb * (tok_emb.size(-1) ** 0.5)
+        return tok_emb + self.pe[:, :tok_emb.size(1)]`,
   },
   {
     title: 'RoPE (Rotary Position Embeddings)',
@@ -1330,7 +1380,6 @@ k = apply_rope(k, cos, sin)   # [B,H,T,d_h]`,
 ];
 
 addTitleSlide();
-addOverviewSlide();
 components.forEach(addComponentSlide);
 
 const outPptx = path.join(__dirname, 'LLMs.pptx');

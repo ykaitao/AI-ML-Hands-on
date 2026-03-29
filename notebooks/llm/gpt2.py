@@ -50,30 +50,31 @@ tokenizer = load_or_train_byte_level_bpe_tokenizer(
     tokenizer_dir=paths.tokenizer_dir,
 )
 
+token_ids = [
+    16,
+    310,
+    966,
+    286,
+    283,
+    263,
+    981,
+    289,
+    580,
+    793,
+    17,
+    81,
+    957,
+    300,
+    305,
+    593,
+]
 print_tokenizer_preview(
     tokenizer,
     sample_text="I love large language models",
     extra_decode_examples=[
         (
             "Decoded one training entry:",
-            [
-                16,
-                310,
-                966,
-                286,
-                283,
-                263,
-                981,
-                289,
-                580,
-                793,
-                17,
-                81,
-                957,
-                300,
-                305,
-                593,
-            ],
+            token_ids,
         )
     ],
 )
